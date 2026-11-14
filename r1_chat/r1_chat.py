@@ -101,6 +101,16 @@ def wav_to_pcm16k(data: bytes) -> bytes:
         return to_pcm16k(frames, w.getframerate())
 
 
+def boost(pcm: bytes, gain_db: float) -> bytes:
+    """R1 の音量100より大きく聞かせるため、PCM を持ち上げてソフトに頭打ちさせる（音割れを抑えた音圧上げ）。"""
+    if gain_db <= 0:
+        return pcm
+    x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    g = 10 ** (gain_db / 20)
+    y = np.tanh(x * g) / np.tanh(g)      # 小さい音は約 g 倍、大きい音は 1.0 手前で丸める
+    return (np.clip(y, -1.0, 1.0) * 32000).astype("<i2").tobytes()
+
+
 def clean_for_speech(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[*_#`>|~\-]{1,}", " ", text)
@@ -300,6 +310,7 @@ def main() -> None:
     p.add_argument("--say", help="この文だけ話して終了（LLM・マイクは使わない）")
     p.add_argument("--echo", action="store_true", help="LLM を使わず、聞き取った文をそのまま話す（接続確認用）")
     p.add_argument("--volume", type=int, default=70)
+    p.add_argument("--gain", type=float, default=0.0, help="音声をさらに持ち上げる量(dB)。6〜12 くらい。上げすぎると歪む")
     p.add_argument("--tts", choices=("sapi", "openai", "sbv2"), default="sapi")
     p.add_argument("--voice", help="sapi: 'Microsoft Ichiro'(既定) / openai: onyx(既定) など")
     p.add_argument("--rate", type=int, default=0, help="sapi の話す速さ -10〜10")
@@ -369,7 +380,7 @@ def run(args) -> None:
         if not text:
             return 0.0
         t0 = time.time()
-        pcm = tts.synth(text)
+        pcm = boost(tts.synth(text), args.gain)
         synth_s = time.time() - t0
         log(f"  (音声合成 {synth_s:.1f}s, {len(pcm) / (SAMPLE_RATE * 2):.1f}s ぶん)")
         speaker.play(pcm)

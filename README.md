@@ -3,6 +3,8 @@
 Unitree R1 を、日本語で会話する受付・案内ロボットにする。
 プログラムはすべて手元の PC で動かし、LAN（DDS）経由で R1 に命令を送る。R1 の Onboard PC には触らない。
 
+**当日の運用は [docs/DEMO_RUNBOOK.md](docs/DEMO_RUNBOOK.md)（デモ運用手順書）を見る。**
+
 ## 技術的アプローチ
 
 ```
@@ -78,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1
 - `r1_chat_<日時>_<モード>_turns.jsonl`：1 往復ごとの記録（入力、認識結果、返答、認識・LLM・合成の秒数、エラー）
 - `--save-audio` で録音した声も `logs/audio/` に WAV で残す。`--no-log` でログなし
 
-主なオプション：`--volume 70`、`--rate 2`（Ichiro の速さ -10〜10）、`--model gpt-5-mini`（または環境変数 `OPENAI_MODEL`）、
+主なオプション：`--volume 70`（R1 の音量、上限 100）、`--gain 9`（さらに音圧を上げる dB）、`--rate 2`（Ichiro の速さ -10〜10）、`--model gpt-5-mini`（または環境変数 `OPENAI_MODEL`）、
 `--tts openai --voice onyx`、`--mic-device <番号>`、`--stt-device cpu --stt-compute-type int8`
 
 ## 安全ルール（ハッカソン運用ガイドより）
