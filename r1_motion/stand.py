@@ -26,7 +26,7 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.rpc.client import Client
 
 FSM_NAMES = {0: "Zero Torque（脱力・紫）", 1: "Damping（ブレーキ・オレンジ）", 4: "Locked Stand（直立・青）",
-             811: "Running（自立・歩行・白）", 701: "Lie→Stand（起き上がり中）", 702: "Stand→Lie（寝る動作中）"}
+             811: "Running（自立・歩行・白）", 816: "Running＋腕の動作中（Arm Action 実行中に観測）", 701: "Lie→Stand（起き上がり中）", 702: "Stand→Lie（寝る動作中）"}
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 _log = None
 
@@ -48,6 +48,12 @@ class R1Loco(Client):
         self._RegistApi(7001, 0)   # GetFsmId
         self._RegistApi(7002, 0)   # GetFsmMode
         self._RegistApi(7101, 0)   # SetFsmId
+        self._RegistApi(7105, 0)   # SetVelocity
+        # 手振り・握手は sport ではなく arm サービス（arm_action.py）。sport の 7106 はこの R1 では 3203
+
+    def stop_move(self) -> int:
+        code, _ = self._Call(7105, json.dumps({"velocity": [0.0, 0.0, 0.0], "duration": 1.0}))
+        return code
 
     def get_fsm(self) -> int | None:
         code, data = self._Call(7001, "{}")

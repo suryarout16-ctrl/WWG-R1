@@ -1,7 +1,7 @@
 # R1 日本語チャット デモ運用手順書
 
 対象：Unitree R1 ＋ WWG-R1（PC で音声認識 → OpenAI → 日本語音声を R1 のスピーカーで再生）
-前提：プログラムはすべて PC で動かす。R1 の Onboard PC には触らない。R1 の体はこのデモでは動かさない（音声のみ）。
+前提：プログラムはすべて PC で動かす。R1 の Onboard PC には触らない。既定は音声のみ。`--motion` を付けたときだけ、会話に合わせて腕のプリセット動作（手を振る・拍手など）を送る。
 
 ---
 
@@ -102,6 +102,7 @@ pixi run chat -i Ethernet --volume 100 --gain 9
 
 - 「君は誰？」「何ができるの？」「好きな食べ物は？」「今日の調子は？」
 - 体を動かす依頼（「踊って」「歩いて」）には「今は話すことだけ」と答える設定
+- `--motion` 付きなら「手を振って」「拍手して」に身ぶりで応える（歩く・踊る・握手は会話からはしない）。身ぶりの間は R1 の腕の届く範囲に人を入れない
 
 ---
 
@@ -156,5 +157,9 @@ pixi run chat -i Ethernet --volume 100 --gain 9
 | 一言話させる | `pixi run chat -i Ethernet --volume 100 --gain 9 --say "こんにちは"` |
 | 聞き取り確認（おうむ返し） | `pixi run chat -i Ethernet --volume 100 --gain 9 --echo` |
 | **本番** | `pixi run chat -i Ethernet --volume 100 --gain 9` |
+| **本番＋身ぶり**（R1 が Running のとき。周囲 2m を空ける） | `pixi run chat -i Ethernet --volume 100 --gain 9 --motion` |
+| あいさつデモ（脱力から自動、E-Stop 担当がいるとき） | `pixi run python r1_motion/greet.py -i Ethernet --posture l --auto` |
+| 立っているときのあいさつだけ | `pixi run python r1_motion/greet.py -i Ethernet --skip-stand --auto` |
+| 腕を初期姿勢に戻す | `pixi run python r1_motion/arm_action.py -i Ethernet --id 99` |
 | R1 なしで練習 | `pixi run chat --local` |
 | API キーの確認 | `pixi run python r1_chat/credentials.py status` |

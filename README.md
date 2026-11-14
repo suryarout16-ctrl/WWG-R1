@@ -68,6 +68,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1
 | R1 に一言話させる（LLM 不要） | `pixi run chat -i Ethernet --say "こんにちは、僕はR1です"` |
 | マイク→認識→声 の確認（おうむ返し、LLM 不要） | `pixi run chat -i Ethernet --echo` |
 | 本番（声で会話） | `pixi run chat -i Ethernet` |
+| 本番＋身ぶり（LLM が手を振る・拍手などを選ぶ） | `pixi run chat -i Ethernet --motion` |
+| 身ぶりの選ばれ方だけ確認（R1 なし） | `pixi run chat --local --text --motion` |
+| あいさつデモ（脱力→起立→手振り・あいさつ→握手） | `pixi run python r1_motion/greet.py -i Ethernet --posture l` |
+| 腕のプリセット動作の一覧 / 実行 | `pixi run python r1_motion/arm_action.py -i Ethernet --list` / `--id 25` |
 | R1 なしで PC のスピーカーで試す | `pixi run chat --local` |
 | マイクなし（キーボード） | `pixi run chat --local --text` |
 
@@ -82,6 +86,13 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1
 
 主なオプション：`--volume 70`（R1 の音量、上限 100）、`--gain 9`（さらに音圧を上げる dB）、`--rate 2`（Ichiro の速さ -10〜10）、`--model gpt-5-mini`（または環境変数 `OPENAI_MODEL`）、
 `--tts openai --voice onyx`、`--mic-device <番号>`、`--stt-device cpu --stt-compute-type int8`
+
+### 身ぶり（`--motion`）
+
+- LLM は返事を `{"say": 文, "gesture": 身ぶり}` の JSON（Structured Outputs）で返し、話し始めと同時に R1 の Arm Action（`arm` サービス、API 7106）を送る
+- 会話から呼べるのは 6 種類だけ：wave(25 胸の前で手を振る) / wave_big(26 頭の上) / clap(17 拍手) / fist_pump(29 ガッツポーズ) / hand_on_heart(33 右手を胸に) / emphasize(35 強調)。握手・ハグなど人に触れる動作は入れない
+- R1 が Running（811）のときだけ送る。姿勢を保つ動作は話し終わったら 99 で腕を戻す。ログの `gesture` / `gesture_status` / `gesture_code` に記録
+- 手振り・握手は `sport` ではなく `arm` サービス（`sport` の 7106 はこの R1 では 3203 = 未実装）
 
 ## 安全ルール（ハッカソン運用ガイドより）
 

@@ -6,7 +6,8 @@
           --(PCで日本語TTS, 男性の声)--> 16kHz PCM --(AudioClient.PlayStream)--> R1のスピーカー
 
 R1本体の TtsMaker は英語/中国語しか話せないため、音声はPCで作って PCM で流す。
-R1の体は動かさない（音声だけ）。
+既定では R1 の体は動かさない（音声だけ）。--motion を付けると、LLM が返事に合う身ぶりを選び、
+話し始めと同時に R1 の Arm Action（腕のプリセット動作）を送る。立っている（Running）ときだけ送る。
 
 例（リポジトリのルートで）:
   pixi run chat -i Ethernet                     # 本番（声で会話）
@@ -14,6 +15,8 @@ R1の体は動かさない（音声だけ）。
   pixi run chat --local --text                  # マイクなし、キーボードで会話
   pixi run chat -i Ethernet --echo              # LLMなし、聞き取った文をおうむ返し
   pixi run chat -i Ethernet --say "こんにちは"   # 一言だけ話させて終了
+  pixi run chat -i Ethernet --motion            # 会話に合わせて腕の身ぶり（手を振る・拍手など）も付ける
+  pixi run chat --local --text --motion         # R1 なしで、LLM がどの身ぶりを選ぶかだけ確認
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import wave
@@ -46,8 +50,28 @@ DEFAULT_CUDA_DLL_DIR = os.environ.get("R1_CUDA_DLL_DIR", "")
 SYSTEM_PROMPT = """あなたはUnitree社のヒューマノイドロボット「R1」です。ハッカソン会場で来場者と話しています。
 - 一人称は「僕」。落ち着いた、親しみやすい男性の話し言葉で答える
 - 返答は日本語で1〜2文、60文字程度まで。音声で読み上げるので短く
-- 記号、絵文字、箇条書き、URL、英字の略語は使わない。数字は読みやすく
-- 体を動かす約束はしない（今は話すことだけができる）"""
+- 記号、絵文字、箇条書き、URL、英字の略語は使わない。数字は読みやすく"""
+
+NO_MOTION_RULE = "\n- 体を動かす約束はしない（今は話すことだけができる）"
+
+MOTION_RULE = """
+- 返事と一緒に、腕の身ぶりを gesture から1つ選べる。say には読み上げる日本語だけを書く
+  wave: あいさつ・お別れ / wave_big: 大きく手を振る（遠くの人へ、盛り上げたいとき）/ clap: 拍手・お祝い
+  fist_pump: やったね・がんばろう / hand_on_heart: 感謝や気持ちを伝える / emphasize: 説明で強調したいとき
+- 合う身ぶりが無ければ none。毎回は動かさない（3回に1回くらい）。「手を振って」など頼まれた身ぶりが上にあれば選ぶ
+- 会話中は歩く・踊る・物を持つ・握手・ハグはしない。頼まれたら、できる身ぶりを提案して話で返す"""
+
+# 会話から呼べる腕の動作（R1 Arm Action のプリセット ID）。人に触れる動作（握手・ハグ・ハイタッチ）は入れない
+GESTURES = {
+    "wave": (25, "胸の前で手を振る"),
+    "wave_big": (26, "頭の上で手を振る"),
+    "clap": (17, "拍手"),
+    "fist_pump": (29, "ガッツポーズ（右）"),
+    "hand_on_heart": (33, "右手を胸に当てる"),
+    "emphasize": (35, "強調のしぐさ"),
+}
+HOLD_IDS = {29, 33, 35}   # 終わったあと姿勢を保つ動作 → 話し終わったら 99 で腕を戻す
+STANDING_FSM = {811, 816}  # Running（816 は Arm Action 実行中に観測）
 
 
 REPO_ROOT = HERE.parent
@@ -230,6 +254,71 @@ class LocalSpeaker:
         sd.wait()
 
 
+# ---------------------------------------------------------------- 腕の身ぶり (R1 Arm Action)
+class Gesturer:
+    """LLM が選んだ身ぶりを、話し始めと同時に送る。dry=True（--local）なら送らずに表示だけ。"""
+
+    def __init__(self, dry: bool):
+        self.dry = dry
+        self.thread = None
+        self.action_id = None
+        self.result: dict = {}
+        if dry:
+            log("[動作] --local のため身ぶりは送らず、選ばれた身ぶりを表示だけします")
+            return
+        sys.path.insert(0, str(REPO_ROOT / "r1_motion"))
+        from arm_action import connect, describe   # ChannelFactoryInitialize の後で呼ぶこと
+        from stand import R1Loco
+        self.describe = describe
+        self.arm = connect(12.0)
+        self.loco = R1Loco()
+        self.loco.SetTimeout(3.0)
+        self.loco.Init()
+        log(f"[動作] 身ぶりを使います: {', '.join(f'{k}={v[1]}' for k, v in GESTURES.items())}")
+
+    def start(self, name: str) -> str:
+        if name not in GESTURES:
+            return "none"
+        action_id, label = GESTURES[name]
+        if self.dry:
+            log(f"  [動作] {label}（ID {action_id}、--local なので送らない）")
+            return "dry"
+        if self.thread and self.thread.is_alive():
+            log("  [動作] 前の身ぶりがまだ動いているので送らない")
+            return "busy"
+        try:
+            fsm = self.loco.get_fsm()
+        except Exception as error:
+            log(f"  [動作] モードを読めないので送らない: {error}")
+            return "fsm_error"
+        if fsm not in STANDING_FSM:
+            log(f"  [動作] 立っていない（モード {fsm}）ので送らない")
+            return f"skip_fsm_{fsm}"
+        self.action_id, self.result = action_id, {}
+
+        def run():
+            self.result["code"] = self.arm.execute(action_id)   # 動作が終わるまで戻らない
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+        log(f"  [動作] {label}（ID {action_id}）")
+        return "sent"
+
+    def finish(self):
+        """話し終わったら呼ぶ。動作の終了を待ち、姿勢を保つ動作なら腕を戻す。"""
+        if self.dry or not self.thread:
+            return None
+        self.thread.join(timeout=12)
+        code = self.result.get("code")
+        if code != 0:
+            log(f"  [動作] 結果: {self.describe(code) if code is not None else '応答なし'}")
+        if code == 0 and self.action_id in HOLD_IDS:
+            release = self.arm.release()
+            if release != 0:
+                log(f"  [動作] 腕を戻す(99): {self.describe(release)}")
+        self.thread = None
+        return code
+
+
 # ---------------------------------------------------------------- 音声認識 (faster-whisper)
 class WhisperSTT:
     def __init__(self, python: Path, model: str, device: str, compute_type: str, dll_dir: str = ""):
@@ -280,25 +369,44 @@ def record_push_to_talk(device) -> np.ndarray:
 
 # ---------------------------------------------------------------- LLM
 class Brain:
-    def __init__(self, client, model: str, effort: str):
-        self.client, self.model, self.effort = client, model, effort
+    def __init__(self, client, model: str, effort: str, motion: bool = False):
+        self.client, self.model, self.effort, self.motion = client, model, effort, motion
         self.previous_id = None
+        self.instructions = SYSTEM_PROMPT + (MOTION_RULE if motion else NO_MOTION_RULE)
 
-    def reply(self, user_text: str) -> str:
-        kwargs = dict(model=self.model, instructions=SYSTEM_PROMPT, input=user_text,
+    def reply(self, user_text: str) -> tuple[str, str]:
+        """(読み上げる文, 身ぶり名 or "none") を返す。"""
+        kwargs = dict(model=self.model, instructions=self.instructions, input=user_text,
                       previous_response_id=self.previous_id, max_output_tokens=400)
+        if self.motion:   # 文と身ぶりを JSON で受け取る（Structured Outputs）
+            kwargs["text"] = {"format": {
+                "type": "json_schema", "name": "r1_reply", "strict": True,
+                "schema": {"type": "object", "additionalProperties": False, "required": ["say", "gesture"],
+                           "properties": {"say": {"type": "string"},
+                                          "gesture": {"type": "string", "enum": ["none", *GESTURES]}}}}}
         if self.effort:
             kwargs["reasoning"] = {"effort": self.effort}
         try:
             resp = self.client.responses.create(**kwargs)
         except Exception as error:   # reasoning 非対応モデルなら外してやり直す
-            if self.effort and "reasoning" in str(error).lower():
-                log(f"[LLM] {self.model} は reasoning 指定に非対応のため外します")
+            text = str(error).lower()
+            if self.effort and "reasoning" in text and ("unsupported" in text or "not supported" in text):
+                log(f"[LLM] {self.model} は reasoning 指定に非対応のため外します: {str(error)[:200]}")
                 self.effort = ""
                 return self.reply(user_text)
             raise
+        out = resp.output_text.strip()
+        if not out:   # 推論でトークンを使い切った等。会話の流れに残さず、呼び出し側で定型文にする
+            details = getattr(resp, "incomplete_details", None)
+            raise RuntimeError(f"返答が空でした (status={resp.status}, {details})")
         self.previous_id = resp.id
-        return resp.output_text.strip()
+        if not self.motion:
+            return out, "none"
+        try:
+            data = json.loads(out)
+            return str(data.get("say", "")).strip(), str(data.get("gesture", "none"))
+        except (json.JSONDecodeError, AttributeError):
+            return out, "none"
 
 
 # ---------------------------------------------------------------- main
@@ -328,6 +436,8 @@ def main() -> None:
     p.add_argument("--mic-device", default=None, help="sounddevice の入力デバイス番号か名前")
     p.add_argument("--log-dir", default=str(REPO_ROOT / "logs"), help="ログの保存先")
     p.add_argument("--no-log", action="store_true", help="ログを残さない")
+    p.add_argument("--motion", action="store_true",
+                   help="会話に合わせて腕の身ぶりを付ける（R1 が Running のときだけ送る。--local では表示だけ）")
     p.add_argument("--save-audio", action="store_true", help="録音した声も logs/audio に WAV で残す（認識の確認用）")
     args = p.parse_args()
 
@@ -374,8 +484,11 @@ def run(args) -> None:
 
     speaker = LocalSpeaker() if args.local else RobotSpeaker(args.interface, args.volume)
 
-    def speak(text: str) -> float:
-        """話して、音声合成にかかった秒数を返す。"""
+    use_motion = args.motion and args.say is None and not args.echo
+    gesturer = Gesturer(dry=args.local) if use_motion else None
+
+    def speak(text: str, gesture: str = "none", record: dict | None = None) -> float:
+        """話して、音声合成にかかった秒数を返す。gesture があれば話し始めと同時に腕を動かす。"""
         text = clean_for_speech(text)
         if not text:
             return 0.0
@@ -383,7 +496,16 @@ def run(args) -> None:
         pcm = boost(tts.synth(text), args.gain)
         synth_s = time.time() - t0
         log(f"  (音声合成 {synth_s:.1f}s, {len(pcm) / (SAMPLE_RATE * 2):.1f}s ぶん)")
-        speaker.play(pcm)
+        status = gesturer.start(gesture) if gesturer and gesture != "none" else None
+        try:
+            speaker.play(pcm)
+        finally:
+            if status == "sent":
+                code = gesturer.finish()
+                if record is not None:
+                    record["gesture_code"] = code
+        if record is not None and status:
+            record["gesture_status"] = status
         return synth_s
 
     if args.say is not None:
@@ -399,7 +521,7 @@ def run(args) -> None:
             log_turn(**record)
         return
 
-    brain = None if args.echo else Brain(client, args.model, args.reasoning_effort)
+    brain = None if args.echo else Brain(client, args.model, args.reasoning_effort, motion=use_motion)
     stt = None if args.text else WhisperSTT(args.stt_python, args.stt_model, args.stt_device,
                                             args.stt_compute_type, args.cuda_dll_dir)
     mic = int(args.mic_device) if args.mic_device and args.mic_device.isdigit() else args.mic_device
@@ -455,19 +577,23 @@ def run(args) -> None:
             record["user"] = user_text
 
             t0 = time.time()
+            gesture = "none"
             if brain is None:   # --echo: 聞き取った文をそのまま返す（キーなしで経路だけ確認）
                 answer = f"今、{user_text}、と聞こえました。"
             else:
                 try:
-                    answer = brain.reply(user_text)
+                    answer, gesture = brain.reply(user_text)
                 except Exception as error:   # 回線切れなどで止まらないようにする
                     log(f"  [LLM エラー] {type(error).__name__}: {str(error)[:200]}")
                     record["error"] = f"llm: {type(error).__name__}: {str(error)[:200]}"
                     answer = "ごめんなさい、今ちょっと通信がうまくいきません。もう一度話しかけてください。"
             record.update(answer=answer, llm_s=round(time.time() - t0, 2))
-            log(f"R1 ({record['llm_s']:.1f}s) > {answer}")
+            if use_motion:
+                record["gesture"] = gesture
+            shown = f"  ［身ぶり: {GESTURES[gesture][1]}］" if gesture in GESTURES else ""
+            log(f"R1 ({record['llm_s']:.1f}s) > {answer}{shown}")
             try:
-                record["tts_s"] = round(speak(answer), 2)
+                record["tts_s"] = round(speak(answer, gesture, record), 2)
             except Exception as error:
                 log(f"  [発話エラー] {type(error).__name__}: {error}")
                 record["error"] = f"speak: {type(error).__name__}: {error}"
