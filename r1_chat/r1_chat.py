@@ -299,10 +299,14 @@ def main() -> None:
     needs_openai = (args.say is None and not args.echo) or args.tts == "openai"
     client = None
     if needs_openai:
-        if not os.environ.get("OPENAI_API_KEY"):
-            sys.exit("環境変数 OPENAI_API_KEY が設定されていません")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:   # 無ければ Windows 資格情報マネージャー（このPCの中だけに保存）から読む
+            from credentials import get_secret
+            api_key = get_secret()
+        if not api_key:
+            sys.exit("OpenAI の API キーがありません。`pixi run python r1_chat/credentials.py set` で保存してください")
         from openai import OpenAI
-        client = OpenAI()
+        client = OpenAI(api_key=api_key)
 
     if args.tts == "sapi":
         tts = SapiTTS(args.voice or "Microsoft Ichiro", args.rate)

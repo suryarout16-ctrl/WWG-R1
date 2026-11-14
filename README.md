@@ -35,7 +35,9 @@ PCマイク ──▶ faster-whisper (small / ja / VAD) ──▶ OpenAI API (Re
 1. Git と [pixi](https://pixi.prefix.dev/latest/installation/) を入れる
 2. `git clone https://github.com/suryarout16-ctrl/WWG-R1.git` → `cd WWG-R1` → `pixi install`
 3. `pixi run verify-sdk` で `unitree_sdk2py & cyclonedds loaded successfully!` が出れば OK
-4. OpenAI の API キーを環境変数 `OPENAI_API_KEY` に入れる（リポジトリやチャットには書かない）
+4. OpenAI の API キーを、このPCの中だけに保存する（リポジトリやチャットには書かない）
+   Windows: `pixi run python r1_chat/credentials.py set`（資格情報マネージャーに暗号化保存。`status` で確認）
+   その他の OS: 環境変数 `OPENAI_API_KEY`
    PowerShell: `[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "<キー>", "User")` → 開き直す
 5. （任意・Windows で GPU 認識）cuBLAS 12 / cuDNN 9 の DLL があるフォルダを `R1_CUDA_DLL_DIR` に入れる。無ければ CPU で動く
 6. Windows は有線 LAN アダプタ名を英数字（例 `Ethernet`）に変えておく
