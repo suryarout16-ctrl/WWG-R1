@@ -297,7 +297,11 @@ class Gesturer:
         self.action_id, self.result = action_id, {}
 
         def run():
-            self.result["code"] = self.arm.execute(action_id)   # 動作が終わるまで戻らない
+            code = self.arm.execute(action_id)   # 動作が終わるまで戻らない
+            if code == 7401:   # 前の動作（握手など）で腕が止まったまま → 戻してから送り直す
+                self.arm.release()
+                code = self.arm.execute(action_id)
+            self.result["code"] = code
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
         log(f"  [動作] {label}（ID {action_id}）")

@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R1 操作パネル</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2330; --muted: #677085; --line: #e1e4ea;
+  --accent: #2f6fde; --accent-ink: #ffffff; --user: #e8f0ff; --r1: #f1f2f5; --sys: #fff6e0;
+  --rec: #d93a3a; --ok: #1f9d55; --warn: #c07a00;
+  --fsm-0: #8a4fd6; --fsm-1: #e07b1a; --fsm-4: #2f6fde; --fsm-run: #e9edf3; --fsm-run-ink: #1d2330;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1b1f27; --ink: #e6e9ef; --muted: #9aa3b5; --line: #2b313c;
+    --accent: #5b8ff0; --user: #22324f; --r1: #252a34; --sys: #3a3220;
+    --fsm-run: #e9edf3; --fsm-run-ink: #12151b;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.6 "Yu Gothic UI", "Meiryo", system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 18px; margin: 0; margin-right: auto; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px;
+  font-weight: 600; font-size: 14px; background: var(--line); }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.busy { color: var(--warn); font-weight: 600; min-width: 6em; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; padding: 16px;
+  max-width: 1200px; margin: 0 auto; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.card h2 { font-size: 14px; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+#history { height: 52vh; min-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+.msg.user { align-self: flex-end; background: var(--user); }
+.msg.r1 { align-self: flex-start; background: var(--r1); }
+.msg.system { align-self: center; background: var(--sys); font-size: 13px; }
+.meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.empty { color: var(--muted); margin: auto; text-align: center; }
+.input-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.input-row input { flex: 1 1 240px; min-width: 0; padding: 10px 12px; font: inherit; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+#mic { width: 100%; padding: 18px; font-size: 18px; font-weight: 700; border-radius: 12px; }
+#mic.on { background: var(--rec); border-color: var(--rec); color: #fff; }
+.hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.grid button { padding: 10px 6px; font-size: 14px; }
+.grid button.release { grid-column: 1 / -1; font-weight: 700; }
+.side { display: flex; flex-direction: column; gap: 16px; }
+.personas { display: flex; flex-direction: column; gap: 8px; }
+.personas button { display: flex; justify-content: space-between; align-items: center; text-align: left; }
+.personas button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.state-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-left: 8px; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.switch { position: relative; width: 46px; height: 26px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; background: var(--line); border-radius: 999px; transition: .15s; cursor: pointer; }
+.slider:before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: .15s; }
+.switch input:checked + .slider { background: var(--ok); }
+.switch input:checked + .slider:before { transform: translateX(20px); }
+#log { height: 22vh; min-height: 140px; overflow-y: auto; font: 12px/1.5 Consolas, monospace;
+  white-space: pre-wrap; color: var(--muted); margin: 0; }
+.notice { font-size: 13px; color: var(--muted); }
+.notice b { color: var(--rec); }
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink);
+  color: var(--bg); padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+#toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <h1>R1 操作パネル</h1>
+  <span class="busy" id="busy"></span>
+  <span class="chip" id="fsm"><span class="dot"></span><span id="fsmText">—</span></span>
+</header>
+<main>
+  <section class="card">
+    <h2>会話</h2>
+    <div id="history"><div class="empty">文字かマイクで R1 に話しかけてください</div></div>
+    <div class="input-row">
+      <input id="text" placeholder="R1 に話しかける（Enter で送信）" autocomplete="off">
+      <button class="primary" id="send">送信</button>
+      <button id="say" title="LLM を通さず、この文をそのまま R1 に話させる">そのまま話させる</button>
+    </div>
+  </section>
+  <div class="side">
+    <section class="card">
+      <h2>人格</h2>
+      <div id="personas" class="personas"></div>
+      <div class="hint" id="personaHint"></div>
+    </section>
+    <section class="card">
+      <h2>マイク（この PC）</h2>
+      <button id="mic">🎙 録音開始</button>
+      <div class="hint">押して話し、もう一度押すと送信。入力欄の外ならスペースキーでも操作できます</div>
+    </section>
+    <section class="card">
+      <h2>身ぶり</h2>
+      <div class="toggle" style="margin-bottom:10px">
+        <span>会話に合わせて自動で動かす</span>
+        <label class="switch"><input type="checkbox" id="auto"><span class="slider"></span></label>
+      </div>
+      <div class="grid" id="buttons"></div>
+      <div class="hint">R1 が Running（自立）のときだけ送ります。握手・ハイタッチは手を出したまま止まるので「腕を戻す」で戻します（20 秒で自動でも戻る）</div>
+    </section>
+    <section class="card">
+      <h2>操作</h2>
+      <div class="input-row" style="margin-top:0">
+        <button id="greet">あいさつ（手を振る）</button>
+        <button id="reset">会話をリセット</button>
+      </div>
+      <p class="notice"><b>緊急停止はコントローラーの E-Stop</b>（無ければ L2+B を 5 秒長押し）。このパネルでは止めません。</p>
+    </section>
+  </div>
+  <section class="card" style="grid-column: 1 / -1">
+    <h2>ログ</h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null, lastHistory = -1, lastLog = "";
+
+async function post(path, body = {}) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!data.ok) toast(data.message || "できませんでした");
+    refresh();
+    return data.ok;
+  } catch (e) { toast("パネルのサーバーに届きません"); return false; }
+}
+
+function toast(text) {
+  const t = $("toast"); t.textContent = text; t.classList.add("show");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+function fsmStyle(fsm) {
+  if (fsm === 0) return ["var(--fsm-0)", "#fff"];
+  if (fsm === 1) return ["var(--fsm-1)", "#fff"];
+  if (fsm === 4 || fsm === 701 || fsm === 702) return ["var(--fsm-4)", "#fff"];
+  if (fsm === 811 || fsm === 816) return ["var(--fsm-run)", "var(--fsm-run-ink)"];
+  return ["var(--line)", "var(--ink)"];
+}
+
+function render(s) {
+  state = s;
+  const [bg, ink] = fsmStyle(s.fsm);
+  const chip = $("fsm"); chip.style.background = bg; chip.style.color = ink;
+  $("fsmText").textContent = s.local ? "R1 なし（ローカル）" : (s.fsm_ok ? `${s.fsm} ${s.fsm_name}` : "R1 に届きません");
+  $("busy").textContent = s.recording ? `● 録音中 ${s.rec_s}s` : (s.busy ? `${s.busy}…` : "");
+  $("busy").style.color = s.recording ? "var(--rec)" : "var(--warn)";
+  $("auto").checked = s.auto_motion;
+
+  const mic = $("mic");
+  mic.classList.toggle("on", s.recording);
+  mic.textContent = s.recording ? "■ 録音停止して送信" : "🎙 録音開始";
+  mic.disabled = !s.stt || (!s.recording && !!s.busy);
+  for (const id of ["send", "say", "greet"]) $(id).disabled = !!s.busy || s.recording;
+
+  const pbox = $("personas");
+  if (pbox.children.length !== s.personas.length) {
+    pbox.innerHTML = "";
+    for (const p of s.personas) {
+      const el = document.createElement("button"); el.dataset.key = p.key;
+      el.innerHTML = '<span class="pl"></span><span class="state-dot"></span>';
+      el.onclick = () => post("/api/persona", { key: p.key });
+      pbox.appendChild(el);
+    }
+  }
+  [...pbox.children].forEach((el, i) => {
+    const p = s.personas[i];
+    el.querySelector(".pl").textContent = p.label;
+    el.querySelector(".state-dot").style.background = p.ok ? "var(--ok)" : "var(--rec)";
+    el.classList.toggle("active", p.key === s.persona);
+    el.title = p.detail; el.disabled = !!s.busy || s.recording;
+  });
+  const cur = s.personas.find((p) => p.key === s.persona);
+  const z = s.personas.find((p) => p.key === "omoshiro");
+  $("personaHint").textContent = `いま: ${cur ? cur.label : s.persona}` + (z && !z.ok ? `　／ Strata: ${z.detail}` : "");
+
+  const standing = s.local || s.fsm === 811 || s.fsm === 816;
+  const grid = $("buttons");
+  if (!grid.children.length) {
+    for (const b of s.buttons) {
+      const el = document.createElement("button");
+      el.textContent = b.label; el.dataset.key = b.key; el.title = `ID ${b.id}`;
+      if (b.key === "release") el.className = "release";
+      el.onclick = () => post("/api/gesture", { key: b.key });
+      grid.appendChild(el);
+    }
+  }
+  for (const el of grid.children) el.disabled = !standing && el.dataset.key !== "release";
+
+  if (s.history.length !== lastHistory) {
+    lastHistory = s.history.length;
+    const h = $("history"); h.innerHTML = "";
+    if (!s.history.length) h.innerHTML = '<div class="empty">文字かマイクで R1 に話しかけてください</div>';
+    for (const m of s.history) {
+      const el = document.createElement("div"); el.className = `msg ${m.role}`;
+      el.textContent = m.text;
+      const meta = [];
+      if (m.role === "user") meta.push(m.source === "声" ? "🎙 声" : "⌨ 文字");
+      if (m.role === "r1" && m.persona) meta.push(m.persona);
+      if (m.role === "r1" && m.direct) meta.push("そのまま発話");
+      if (m.gesture) meta.push(`身ぶり: ${m.gesture}`);
+      if (m.llm_s) meta.push(`${m.llm_s}s`);
+      meta.push(m.time);
+      const md = document.createElement("div"); md.className = "meta"; md.textContent = meta.join(" ・ ");
+      el.appendChild(md); h.appendChild(el);
+    }
+    h.scrollTop = h.scrollHeight;
+  }
+  const logText = s.log.join("\n");
+  if (logText !== lastLog) {
+    const l = $("log"); const atBottom = l.scrollTop + l.clientHeight >= l.scrollHeight - 20;
+    l.textContent = logText; lastLog = logText; if (atBottom) l.scrollTop = l.scrollHeight;
+  }
+}
+
+async function refresh() {
+  try { render(await (await fetch("/api/state")).json()); }
+  catch (e) { $("fsmText").textContent = "パネルのサーバーが止まっています"; }
+}
+
+async function send(path) {
+  const t = $("text").value.trim(); if (!t) return;
+  if (await post(path, { text: t })) $("text").value = "";
+}
+function toggleMic() { if (state) post(state.recording ? "/api/record/stop" : "/api/record/start"); }
+
+$("send").onclick = () => send("/api/chat");
+$("say").onclick = () => send("/api/say");
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) send("/api/chat"); });
+$("mic").onclick = toggleMic;
+$("greet").onclick = () => post("/api/greet");
+$("reset").onclick = () => post("/api/reset");
+$("auto").onchange = (e) => post("/api/motion", { on: e.target.checked });
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && document.activeElement !== $("text") && !e.repeat) { e.preventDefault(); toggleMic(); }
+});
+refresh(); setInterval(refresh, 700);
+</script>
+</body>
+</html>

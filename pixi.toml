@@ -7,6 +7,7 @@ version = "0.1.0"
 [tasks]
 verify-sdk = "python -c \"import cyclonedds, unitree_sdk2py, faster_whisper, openai, sounddevice; print('unitree_sdk2py & cyclonedds loaded successfully!')\""
 chat = "python r1_chat/r1_chat.py"
+ui = "python r1_chat/web_ui.py"
 
 [dependencies]
 # R1 の DDS は CycloneDDS 0.10.2。その公式 wheel がある Python 3.10 に固定する（humanoid_hackathon_env と同じ）

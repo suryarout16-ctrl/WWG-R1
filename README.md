@@ -94,6 +94,24 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1
 - R1 が Running（811）のときだけ送る。姿勢を保つ動作は話し終わったら 99 で腕を戻す。ログの `gesture` / `gesture_status` / `gesture_code` に記録
 - 手振り・握手は `sport` ではなく `arm` サービス（`sport` の 7106 はこの R1 では 3203 = 未実装）
 
+### 操作パネルと人格（`pixi run ui`）
+
+ブラウザで http://127.0.0.1:8765 を開いて操作する（文字・マイク・身ぶりボタン・人格の切り替え・ログ）。
+
+| 人格 | LLM | 料金 |
+|---|---|---|
+| R1（標準） | OpenAI（gpt-5-mini） | API 料金あり |
+| おもしろR1 | Z840 の Strata（Qwen3.8-Flash-Next IQ3_XXS、思考なし、1 往復 約 1〜1.5 秒） | なし（ローカル） |
+
+おもしろR1 は Erika とは別の人格（`r1_chat/personas.py` で編集）。Z840 の Strata は Z840 の中（127.0.0.1:8081）だけで開いていて
+SSH のポート転送も禁止なので、SSH のコマンド実行で Z840 上の中継を呼ぶ（`r1_chat/ssh_relay.py`、Z840 の設定は変えない）。
+
+```powershell
+$env:R1_Z840_HOST = "<Z840 の Tailscale IP>"; $env:R1_Z840_USER = "<ユーザー名>"
+$env:R1_Z840_KEY_DIR = "<id_ed25519 と known_hosts のフォルダ>"; $env:R1_Z840_HOSTKEY_ALIAS = "<known_hosts の名前>"
+pixi run ui -i Ethernet --volume 100 --gain 9 --motion
+```
+
 ## 安全ルール（ハッカソン運用ガイドより）
 
 - Onboard PC にログインしない。プログラムは PC から
