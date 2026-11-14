@@ -50,8 +50,32 @@ SYSTEM_PROMPT = """あなたはUnitree社のヒューマノイドロボット「
 - 体を動かす約束はしない（今は話すことだけができる）"""
 
 
+REPO_ROOT = HERE.parent
+_log_file = None       # 画面と同じ内容を時刻付きで書く .log
+_turn_file = None      # 1往復ごとの記録（.jsonl）
+
+
+def setup_logging(log_dir: str, mode: str) -> Path:
+    global _log_file, _turn_file
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    folder = Path(log_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    base = folder / f"r1_chat_{stamp}_{mode}"
+    _log_file = open(f"{base}.log", "a", encoding="utf-8", buffering=1)
+    _turn_file = open(f"{base}_turns.jsonl", "a", encoding="utf-8", buffering=1)
+    return base
+
+
 def log(message: str) -> None:
     print(message, flush=True)
+    if _log_file:
+        for line in str(message).splitlines() or [""]:
+            _log_file.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+
+
+def log_turn(**record) -> None:
+    if _turn_file:
+        _turn_file.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S"), **record}, ensure_ascii=False) + "\n")
 
 
 # ---------------------------------------------------------------- audio utils
@@ -291,10 +315,32 @@ def main() -> None:
     p.add_argument("--stt-compute-type", default="float16")
     p.add_argument("--cuda-dll-dir", default=DEFAULT_CUDA_DLL_DIR)
     p.add_argument("--mic-device", default=None, help="sounddevice の入力デバイス番号か名前")
+    p.add_argument("--log-dir", default=str(REPO_ROOT / "logs"), help="ログの保存先")
+    p.add_argument("--no-log", action="store_true", help="ログを残さない")
+    p.add_argument("--save-audio", action="store_true", help="録音した声も logs/audio に WAV で残す（認識の確認用）")
     args = p.parse_args()
 
     if not args.local and not args.interface:
         p.error("-i <有線LANアダプタ名> か --local のどちらかを指定してください")
+
+    if not args.no_log:
+        mode = "say" if args.say is not None else "echo" if args.echo else "chat"
+        base = setup_logging(args.log_dir, mode)
+        log(f"[log] {base}.log / {base.name}_turns.jsonl")
+        log(f"[設定] " + " ".join(f"{k}={v}" for k, v in vars(args).items() if k not in ("say",)))
+    try:
+        run(args)
+    except SystemExit as error:
+        if error.code not in (None, 0):
+            log(f"[終了] {error.code}")
+        raise
+    except Exception as error:
+        import traceback
+        log(f"[エラー] {type(error).__name__}: {error}\n{traceback.format_exc()}")
+        raise
+
+
+def run(args) -> None:
 
     needs_openai = (args.say is None and not args.echo) or args.tts == "openai"
     client = None
@@ -317,17 +363,29 @@ def main() -> None:
 
     speaker = LocalSpeaker() if args.local else RobotSpeaker(args.interface, args.volume)
 
-    def speak(text: str) -> None:
+    def speak(text: str) -> float:
+        """話して、音声合成にかかった秒数を返す。"""
         text = clean_for_speech(text)
         if not text:
-            return
+            return 0.0
         t0 = time.time()
         pcm = tts.synth(text)
-        log(f"  (音声合成 {time.time() - t0:.1f}s, {len(pcm) / (SAMPLE_RATE * 2):.1f}s ぶん)")
+        synth_s = time.time() - t0
+        log(f"  (音声合成 {synth_s:.1f}s, {len(pcm) / (SAMPLE_RATE * 2):.1f}s ぶん)")
         speaker.play(pcm)
+        return synth_s
 
     if args.say is not None:
-        speak(args.say)
+        log(f"R1 > {args.say}")
+        record = {"mode": "say", "answer": args.say}
+        try:
+            record["tts_s"] = round(speak(args.say), 2)
+            log("  発話OK")
+        except Exception as error:
+            record["error"] = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            log_turn(**record)
         return
 
     brain = None if args.echo else Brain(client, args.model, args.reasoning_effort)
@@ -343,26 +401,47 @@ def main() -> None:
             typed = input("\nあなた > ").strip()
             if typed.lower() in ("q", "quit", "exit"):
                 break
+            record = {"mode": "echo" if brain is None else "chat"}
             if typed:
                 user_text = typed
+                record["input"] = "text"
+                if _log_file:
+                    _log_file.write(f"{time.strftime('%H:%M:%S')} あなた > {typed}\n")
             elif stt:
                 audio = record_push_to_talk(mic)
+                record.update(input="voice", audio_s=round(len(audio) / SAMPLE_RATE, 2))
                 if len(audio) < SAMPLE_RATE * 0.3:
                     log("  (短すぎるので無視しました)")
                     continue
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    wav_path = f.name
+                if args.save_audio and not args.no_log:
+                    audio_dir = Path(args.log_dir) / "audio"
+                    audio_dir.mkdir(parents=True, exist_ok=True)
+                    wav_path = str(audio_dir / f"{time.strftime('%Y%m%d_%H%M%S')}.wav")
+                    record["audio_file"] = wav_path
+                else:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                        wav_path = f.name
                 with wave.open(wav_path, "wb") as w:
                     w.setnchannels(1); w.setsampwidth(2); w.setframerate(SAMPLE_RATE)
                     w.writeframes(audio.astype("<i2").tobytes())
                 t0 = time.time()
-                user_text = stt.transcribe(wav_path)
-                os.unlink(wav_path)
-                log(f"  認識 ({time.time() - t0:.1f}s): {user_text or '（聞き取れませんでした）'}")
+                try:
+                    user_text = stt.transcribe(wav_path)
+                except Exception as error:
+                    log(f"  [認識エラー] {type(error).__name__}: {error}")
+                    log_turn(**record, error=f"stt: {error}")
+                    continue
+                finally:
+                    if "audio_file" not in record:
+                        os.unlink(wav_path)
+                record["stt_s"] = round(time.time() - t0, 2)
+                log(f"  認識 ({record['stt_s']:.1f}s): {user_text or '（聞き取れませんでした）'}")
                 if not user_text:
+                    log_turn(**record, user="")
                     continue
             else:
                 continue
+            record["user"] = user_text
 
             t0 = time.time()
             if brain is None:   # --echo: 聞き取った文をそのまま返す（キーなしで経路だけ確認）
@@ -372,12 +451,16 @@ def main() -> None:
                     answer = brain.reply(user_text)
                 except Exception as error:   # 回線切れなどで止まらないようにする
                     log(f"  [LLM エラー] {type(error).__name__}: {str(error)[:200]}")
+                    record["error"] = f"llm: {type(error).__name__}: {str(error)[:200]}"
                     answer = "ごめんなさい、今ちょっと通信がうまくいきません。もう一度話しかけてください。"
-            log(f"R1 ({time.time() - t0:.1f}s) > {answer}")
+            record.update(answer=answer, llm_s=round(time.time() - t0, 2))
+            log(f"R1 ({record['llm_s']:.1f}s) > {answer}")
             try:
-                speak(answer)
+                record["tts_s"] = round(speak(answer), 2)
             except Exception as error:
                 log(f"  [発話エラー] {type(error).__name__}: {error}")
+                record["error"] = f"speak: {type(error).__name__}: {error}"
+            log_turn(**record)
     except (KeyboardInterrupt, EOFError):
         log("\n終了します")
     finally:

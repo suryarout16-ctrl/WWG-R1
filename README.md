@@ -44,9 +44,20 @@ PCマイク ──▶ faster-whisper (small / ja / VAD) ──▶ OpenAI API (Re
 
 ## R1 との接続
 
-- LAN ケーブル：R1 のうなじのポート ↔ PC
-- PC の有線 LAN に固定 IP `192.168.123.164` / `255.255.255.0` / ゲートウェイ空欄（R1 は `192.168.123.161`）
-- `ping 192.168.123.161` が通ることを確認
+LAN ケーブルで R1 のうなじのポートと PC をつないだら、1 本のスクリプトで設定〜確認まで行う（Windows、管理者権限は自動で求められる）:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1
+```
+
+1. 有線 LAN アダプタを探し、名前を `Ethernet` に変える
+2. 固定 IP `192.168.123.164/24`（ゲートウェイなし。ほかの IPv4 は外し、元の設定は `.lan_backup.json` に保存）
+3. ネットワークを「プライベート」に（「パブリック」だと 3102 エラーの原因になる）
+4. `192.168.123.161` に ping
+5. R1 に日本語で一言話させる（`pixi run chat -i Ethernet --say ...`）
+
+- `-DryRun` で何も変えずにやることだけ表示、`-Restore` で元に戻す
+- 実行内容と最後のアダプタ状態は `logs\setup_lan_*.log` に残る
 
 ## 使い方（リポジトリのルートで）
 
@@ -59,6 +70,13 @@ PCマイク ──▶ faster-whisper (small / ja / VAD) ──▶ OpenAI API (Re
 | マイクなし（キーボード） | `pixi run chat --local --text` |
 
 会話中：文字を打って Enter → 送信 / 何も打たずに Enter → 録音開始、もう一度 Enter で停止 / `q` で終了
+
+### ログ
+
+`logs/` に実行ごとに残る（Git には含めない）:
+- `r1_chat_<日時>_<chat|echo|say>.log`：画面と同じ内容（時刻付き、エラーの詳細も）
+- `r1_chat_<日時>_<モード>_turns.jsonl`：1 往復ごとの記録（入力、認識結果、返答、認識・LLM・合成の秒数、エラー）
+- `--save-audio` で録音した声も `logs/audio/` に WAV で残す。`--no-log` でログなし
 
 主なオプション：`--volume 70`、`--rate 2`（Ichiro の速さ -10〜10）、`--model gpt-5-mini`（または環境変数 `OPENAI_MODEL`）、
 `--tts openai --voice onyx`、`--mic-device <番号>`、`--stt-device cpu --stt-compute-type int8`
