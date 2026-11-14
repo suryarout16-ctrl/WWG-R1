@@ -1,0 +1,23 @@
+[workspace]
+name = "wwg-r1"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+version = "0.1.0"
+
+[tasks]
+verify-sdk = "python -c \"import cyclonedds, unitree_sdk2py, faster_whisper, openai, sounddevice; print('unitree_sdk2py & cyclonedds loaded successfully!')\""
+chat = "python r1_chat/r1_chat.py"
+
+[dependencies]
+# R1 の DDS は CycloneDDS 0.10.2。その公式 wheel がある Python 3.10 に固定する（humanoid_hackathon_env と同じ）
+python = "3.10.*"
+
+[pypi-dependencies]
+# numpy/scipy は PyPI 版にする。conda 版だと Windows で ctranslate2(faster-whisper) と OpenMP が衝突して落ちる
+numpy = ">=1.26,<2.3"
+scipy = ">=1.13,<2"
+cyclonedds = "==0.10.2"
+unitree_sdk2py = { git = "https://github.com/unitreerobotics/unitree_sdk2_python.git" }
+sounddevice = ">=0.5.6, <0.6"
+openai = ">=3.51.0, <4"
+faster-whisper = ">=1.2.1, <2"

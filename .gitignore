@@ -1,0 +1,7 @@
+.pixi/
+__pycache__/
+*.pyc
+*.wav
+.env
+.env.*
+/tmp/
