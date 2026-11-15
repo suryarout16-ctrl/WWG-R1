@@ -420,13 +420,25 @@ function render(s) {
     el.disabled = isHeld ? false : !bodyReady || !!s.busy || s.recording || body.busy || body.stop_required || !!activeBodyHold;
   }
   $("bodyStop").disabled = !body.enabled;
+  $("bodyStop").textContent = body.stopping ? "停止を確認中…" : body.stop_required ? "停止を再確認" : "歩行を停止";
   const previousStop = body.joint_stationary_observed ? "ゼロ指令後の脚の静止を観測。" : "";
   const native127 = body.code === 127 || body.stop_code === 127;
-  $("bodyState").textContent = body.error ? body.error : activeBodyHold ?
+  const recoveringFeedback = body.monitor?.recovering || body.feedback_status === "recovering";
+  const feedbackAgeText = Number.isFinite(body.feedback_age) ? `（最終データ ${body.feedback_age.toFixed(1)}秒前）` : "";
+  const feedbackProblems = {stale: "状態データが古い", unavailable: "状態データ未受信",
+    crc_or_data_invalid: "CRCまたはデータ形式の異常", profile_mismatch: "機体プロファイルの不一致",
+    mode_pr_mismatch: "関節制御モードの不一致", motor_fault: "モーターの異常状態",
+    invalid_joints: "関節データの異常", invalid_stream_epoch: "受信世代の異常", observer_error: "監視処理の異常"};
+  const feedbackProblemText = feedbackProblems[body.feedback_status] || body.feedback_status || "状態データ待ち";
+  const stopLockText = recoveringFeedback ? "脚の状態データを再接続しています。復旧後に「停止を再確認」を押してください" :
+    !feedbackReady ? `${feedbackProblemText}${feedbackAgeText}。停止未確認のため歩行をロックしています` :
+    "脚の状態データを受信しています。「停止を再確認」でゼロ速度後の静止を確認してください";
+  $("bodyState").textContent = body.stopping ? "ゼロ速度送信後の脚の静止を確認中" :
+    body.stop_required ? stopLockText : body.error ? body.error : activeBodyHold ?
     (activeBodyHold.accepted ? "押下歩行中。ボタンを離すと停止指令を送ります" : "押下歩行の開始を確認中") :
     body.busy ? "指令送信・ゼロ指令後の状態を確認中" :
     !body.enabled ? "歩行は無効です" : s.local ? "実機へ送らないプレビュー" : !bodyRunning ? "Running状態の確認が必要です" :
-    !feedbackReady ? "脚の状態を確認できないため、移動指令を送りません" :
+    !feedbackReady ? (recoveringFeedback ? "脚の状態データを再接続しています。復旧まで移動をロックします" : `${feedbackProblemText}${feedbackAgeText}。移動をロックしています`) :
     previousStop + (native127 ? "R1応答127。機体の移動は未確認です" : "状態監視は有効です。押している間だけ速度指令を更新します");
   $("reset").disabled = !!s.busy || s.recording || call.active;
 

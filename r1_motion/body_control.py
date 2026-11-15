@@ -126,8 +126,27 @@ class BodyController:
         self._stop_verified_at = -math.inf
         self._quiet_wait_event = threading.Event()
         self._stationary_q = None
+        self._stationary_epoch = None
+        self._stop_verification_reason = ""
+        self._stop_verification_generation = 0
         self._retired_hold_tokens = set()
         self._retired_hold_order = deque()
+
+    def require_stop_verification(self, reason="停止の再確認が必要です"):
+        """新規移動を禁止する。停止RPCは送らず、明示的なstop()の確認を待つ。
+
+        起動時など、動作を開始する前に設定するためのインターロック。
+        センサーの復旧だけで解除せず、ゼロ指令後の新しい静止観測で解除する。
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("停止再確認の理由を指定してください")
+        with self._lock:
+            self._stop_failed = True
+            self._stop_verification_generation += 1
+            self._stop_verification_reason = reason.strip()
+            self._joint_stationary_observed = False
+            self._stop_verified_at = -math.inf
+            self._stationary_q = self._stationary_epoch = None
 
     @staticmethod
     def _valid_hold_token(token):
@@ -174,7 +193,7 @@ class BodyController:
             if self._stop_inflight:
                 return False, "停止処理中です"
             if self._stop_failed:
-                return False, "前の停止指令が確認できていません。歩行停止を再試行してください"
+                return False, "停止の再確認が必要です。歩行停止を実行してください"
             if self._active is not None:
                 return False, "前の動作が終了していません"
             now = self._clock()
@@ -244,8 +263,14 @@ class BodyController:
             data = self.feedback()
             if not isinstance(data, dict):
                 reason = "unavailable"
+            elif data.get("recovering") is True:
+                reason = "recovering"
             elif data.get("crc_valid") is not True or data.get("error"):
                 reason = "crc_or_data_invalid"
+            elif (data.get("stream_epoch") is not None and
+                  (isinstance(data["stream_epoch"], bool) or not isinstance(data["stream_epoch"], int)
+                   or data["stream_epoch"] < 0)):
+                reason = "invalid_stream_epoch"
             elif not isinstance(data.get("t"), (int, float)) or isinstance(data.get("t"), bool) or not math.isfinite(data["t"]) or not 0 <= self._clock() - data["t"] < 0.5:
                 reason = "stale"
             elif data.get("mode_machine") != 1:
@@ -288,17 +313,22 @@ class BodyController:
         if not self.require_feedback:
             return True
         data, reason = self._read_feedback()
-        if self._joint_stationary_observed and not reason and self._clock() - self._stop_verified_at < 0.1:
+        if (self._joint_stationary_observed and not reason and
+                self._stationary_epoch == data.get("stream_epoch") and
+                self._clock() - self._stop_verified_at < 0.1):
             return True
         with self._lock:
             self._joint_stationary_observed = False
         deadline = self._clock() + 2.0
-        window, last_t = [], -math.inf
+        window, last_t, window_epoch = [], -math.inf, object()
         while self._clock() <= deadline:
             data, reason = self._read_feedback()
             if reason:
-                window = []
-            elif data["t"] > self._stop_sent_at and data["t"] > last_t:
+                window, last_t, window_epoch = [], -math.inf, object()
+            elif data.get("stream_epoch") != window_epoch:
+                # reader再作成前後の観測を、一続きの静止として合算しない。
+                window, last_t, window_epoch = [], -math.inf, data.get("stream_epoch")
+            if not reason and data["t"] > self._stop_sent_at and data["t"] > last_t:
                 last_t = data["t"]
                 if max(abs(x) for x in data["dqlegs"]) > 0.12:
                     window = []
@@ -312,6 +342,7 @@ class BodyController:
                             self._joint_stationary_observed = True
                             self._stop_verified_at = self._clock()
                             self._stationary_q = list(data["qlegs"])
+                            self._stationary_epoch = window_epoch
                             self._feedback_status = "joint_stationary_observed"
                         return True
             remaining = deadline - self._clock()
@@ -323,11 +354,24 @@ class BodyController:
             self._feedback_status = "stop_not_observed:" + (reason or "joints_not_quiet")
         return False
 
-    def _finish_stop(self, session, *, force=False):
+    def _finish_stop(self, session, *, force=False, explicit=False):
         """呼び出し側が_io_lockを保持する。まずゼロ指令、その後に最長2秒確認する。"""
+        with self._lock:
+            verification_generation = self._stop_verification_generation
         code = self._zero(session, force=force)
         confirmed = self._accepted_velocity_code(code) and self._verify_stationary()
         with self._lock:
+            if verification_generation != self._stop_verification_generation:
+                # この停止処理より後に設定された再確認要求を、古い処理で解除しない。
+                confirmed = False
+                self._joint_stationary_observed = False
+                self._stop_verified_at = -math.inf
+                self._stationary_q = self._stationary_epoch = None
+            if self._stop_verification_reason:
+                if confirmed and explicit and self.require_feedback:
+                    self._stop_verification_reason = ""
+                else:
+                    confirmed = False
             self._stop_failed = not confirmed
             if not confirmed and session is not None:
                 session.status = "stop_unconfirmed"
@@ -363,6 +407,7 @@ class BodyController:
             self._last_stop_code = code
             self._stop_sent_at = self._clock()
             self._joint_stationary_observed = False
+            self._stationary_epoch = None
         if session is not None:
             with self._lock:
                 session.stop_code = code
@@ -390,7 +435,7 @@ class BodyController:
             if self._stop_inflight:
                 return False, "停止処理中です"
             if self._stop_failed:
-                return False, "前の停止指令が確認できていません。歩行停止を再試行してください"
+                return False, "停止の再確認が必要です。歩行停止を実行してください"
             if self._active is not None:
                 return False, "前の移動が終了していません"
             session = _Move(direction, vectors[direction], float(duration), self._clock())
@@ -570,7 +615,7 @@ class BodyController:
                     self._retire_hold(session.token)
         try:
             with self._io_lock:
-                code, confirmed = self._finish_stop(session, force=True)
+                code, confirmed = self._finish_stop(session, force=True, explicit=True)
             with self._lock:
                 if not self._stop_failed and session is not None and session.status in ("stop_error", "stop_unconfirmed"):
                     session.status, session.error = ("stopped_unconfirmed" if code == 127 else "stopped"), ""
@@ -595,11 +640,14 @@ class BodyController:
             session = self._active or self._last
             stop_code = session.stop_code if session and session.stop_code is not None else self._last_stop_code
             native_127 = 127 in ((session.code if session else None), stop_code)
+            current_epoch = data.get("stream_epoch") if isinstance(data, dict) else None
+            epoch_changed = bool(self._joint_stationary_observed and current_epoch != self._stationary_epoch)
             currently_quiet = bool(not current_error and data and max(abs(x) for x in data["dqlegs"]) <= .12 and
-                                   self._stationary_q is not None and max(abs(x-y) for x, y in zip(data["qlegs"], self._stationary_q)) <= .01)
+                                   current_epoch == self._stationary_epoch and self._stationary_q is not None and
+                                   max(abs(x-y) for x, y in zip(data["qlegs"], self._stationary_q)) <= .01)
             stationary_reported = self._joint_stationary_observed and (currently_quiet or not self.require_feedback)
             motion_unconfirmed = bool(self.require_feedback and session and session.sent and not session.joint_motion_observed)
-            physical_confirmation_required = native_127 or (self.require_feedback and not stationary_reported) or motion_unconfirmed
+            physical_confirmation_required = self._stop_failed or native_127 or (self.require_feedback and not stationary_reported) or motion_unconfirmed
             return {"busy": self._active is not None, "dry": self.dry,
                     "stopping": bool(self._stop_inflight),
                     "hold": bool(session and session.hold),
@@ -611,27 +659,30 @@ class BodyController:
                     "linear_speed": self.linear_speed, "forward_speed": self.forward_speed,
                     "yaw_speed": self.yaw_speed,
                     "stop_required": self._stop_failed,
+                    "stop_verification_reason": self._stop_verification_reason,
                     "velocity_127_compatible": self.velocity_127_compatible,
                     "physical_confirmation_required": physical_confirmation_required,
                     "require_feedback": self.require_feedback,
-                    "feedback_status": current_error or ("current_joints_moving" if self._joint_stationary_observed and not currently_quiet and self.require_feedback else self._feedback_status),
+                    "feedback_status": current_error or ("stream_changed" if epoch_changed else "current_joints_moving" if self._joint_stationary_observed and not currently_quiet and self.require_feedback else self._feedback_status),
                     "feedback_valid": bool(self.require_feedback and not current_error),
                     "feedback_t": data.get("t") if isinstance(data, dict) else None,
                     "feedback_age": max(0.0, self._clock()-data["t"]) if isinstance(data, dict) and isinstance(data.get("t"), (int,float)) and math.isfinite(data["t"]) else None,
+                    "feedback_stream_epoch": current_epoch,
                     "joint_stationary_observed": stationary_reported,
+                    "joint_stationary_stream_epoch": self._stationary_epoch if stationary_reported else None,
                     "joint_stationary_observed_at": self._stop_verified_at if math.isfinite(self._stop_verified_at) else None,
                     "joint_motion_observed": session.joint_motion_observed if session else False,
                     "joint_motion_span": session.joint_motion_span if session else 0.0,
                     "max_leg_dq": session.max_leg_dq if session else 0.0,
-                    "response_note": "応答127：実際の動作・停止を確認" if native_127 else "脚の静止は未確認" if self.require_feedback and not stationary_reported else "脚の動作は未確認" if motion_unconfirmed else "",
+                    "response_note": "応答127：実際の動作・停止は目視確認が必要" if native_127 else "脚の静止は未確認" if self.require_feedback and not stationary_reported else "脚の動作は未確認" if motion_unconfirmed else "",
                     "direction": session.direction if session else "",
                     "velocity": list(session.velocity) if session else [0.0, 0.0, 0.0],
                     "duration": session.duration if session else 0.0,
                     "elapsed": round(max(0.0, self._clock() - session.started_at), 3) if session else 0.0,
-                    "status": session.status if session else "idle",
+                    "status": session.status if session else "stop_verification_required" if self._stop_verification_reason else "idle",
                     "code": session.code if session else None,
                     "stop_code": stop_code,
-                    "error": session.error if session else ""}
+                    "error": ("停止再確認が必要です: " + self._stop_verification_reason) if self._stop_verification_reason else session.error if session else ""}
 
     def wait_until_idle(self, timeout: float | None = None) -> bool:
         with self._lock:

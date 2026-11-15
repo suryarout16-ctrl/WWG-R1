@@ -3,6 +3,7 @@ import builtins
 from pathlib import Path
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -230,7 +231,9 @@ class FeedbackTests(unittest.TestCase):
             "unitree_sdk2py.core.channel": SimpleNamespace(ChannelFactory=Mock(return_value=factory)),
             "unitree_sdk2py.idl.unitree_hg.msg.dds_": SimpleNamespace(LowState_=datatype),
             "unitree_sdk2py.utils.crc": SimpleNamespace(CRC=Mock()),
-            "cyclonedds.qos": SimpleNamespace(Qos=FakeQos, Policy=SimpleNamespace(History=SimpleNamespace(KeepLast=FakeKeepLast))),
+            "cyclonedds.qos": SimpleNamespace(Qos=FakeQos, Policy=SimpleNamespace(
+                History=SimpleNamespace(KeepLast=FakeKeepLast),
+                Durability=SimpleNamespace(Volatile="volatile"))),
         }
         with patch.dict(sys.modules, modules):
             monitor = MotorFeedbackMonitor(sample_hz=10, crc_validator=self.validator)
@@ -239,6 +242,7 @@ class FeedbackTests(unittest.TestCase):
             factory.Init.assert_not_called()
             qos = channel.SetReader.call_args.kwargs["qos"]
             self.assertEqual(qos.policies[0].depth, 1)
+            self.assertEqual(qos.policies[1], "volatile")
             self.assertEqual(channel.SetReader.call_args.kwargs["queueLen"], 0)
             self.assertIsNone(channel.SetReader.call_args.kwargs["handler"])
             channel.SetWriter.assert_not_called()
@@ -288,6 +292,231 @@ class FeedbackTests(unittest.TestCase):
             self.assertIsNone(values[1])
         finally:
             reader.Close()
+
+    def test_recovery_quarantines_tick_reset_until_progress_over_time(self):
+        self.monitor.feed(message(5000))
+        original_epoch = self.monitor.snapshot()["stream_epoch"]
+        self.clock.advance(2)
+        self.assertTrue(self.monitor._begin_recovery("no data", 0))
+        pending = self.monitor.snapshot()
+        self.assertFalse(pending["crc_valid"])
+        self.assertTrue(pending["recovering"])
+        self.assertGreater(pending["stream_epoch"], original_epoch)
+        self.assertFalse(self.monitor.feed(message(1)))
+        self.clock.advance(.1)
+        self.assertFalse(self.monitor.feed(message(2)))
+        self.clock.advance(.11)
+        self.assertTrue(self.monitor.feed(message(3)))
+        fresh = self.monitor.snapshot()
+        self.assertTrue(fresh["crc_valid"])
+        self.assertFalse(fresh["recovering"])
+        self.assertEqual(fresh["tick"], 3)
+        self.assertEqual(fresh["recovery_count"], 1)
+
+    def test_repeated_cached_tick_cannot_become_fresh_across_recoveries(self):
+        self.monitor.feed(message(5000))
+        for recovery in range(3):
+            self.clock.advance(1)
+            self.monitor._begin_recovery("no tick progress", 0)
+            pending = self.monitor.snapshot()
+            for _ in range(5):
+                self.clock.advance(.11)
+                self.assertFalse(self.monitor.feed(message(1)))
+                self.assertFalse(self.monitor.snapshot()["crc_valid"])
+                self.assertEqual(self.monitor.snapshot()["t"], pending["t"])
+            self.assertEqual(self.monitor.snapshot()["recovery_count"], recovery + 1)
+        diagnostic = self.monitor.diagnostics()
+        self.assertEqual(diagnostic["accepted_samples"], 1)
+        self.assertEqual(diagnostic["last_receive_age"], 0)
+        self.assertGreater(diagnostic["last_accepted_age"], 4)
+
+    def test_crc_failure_restarts_recovery_confirmation_window(self):
+        self.monitor._begin_recovery("read failure", 0)
+        self.assertFalse(self.monitor.feed(message(10)))
+        self.clock.advance(.11)
+        self.assertFalse(self.monitor.feed(message(11)))
+        self.clock.advance(.11)
+        broken = message(12)
+        broken.crc_ok = False
+        self.monitor.feed(broken)
+        self.assertFalse(self.monitor.snapshot()["crc_valid"])
+        for tick in (13, 14):
+            self.clock.advance(.11)
+            self.assertFalse(self.monitor.feed(message(tick)))
+        self.clock.advance(.11)
+        self.assertTrue(self.monitor.feed(message(15)))
+        self.assertEqual(self.monitor.snapshot()["tick"], 15)
+
+    def test_recovery_rejects_reverse_sequence_and_preserves_motor_faults(self):
+        self.monitor._begin_recovery("reset", 0)
+        for tick in (8, 7, 6, 5):
+            self.clock.advance(.11)
+            self.assertFalse(self.monitor.feed(message(tick)))
+        for tick in (6, 7):
+            self.clock.advance(.11)
+            candidate = message(tick)
+            candidate.motor_state[3].motorstate = 8
+            accepted = self.monitor.feed(candidate)
+        self.assertTrue(accepted)
+        self.assertEqual(self.monitor.snapshot()["motor_fault"], [{"joint": 3, "motorstate": 8}])
+
+    def test_old_generation_cannot_reset_a_restarted_monitor(self):
+        subscriptions = []
+        def factory(*_):
+            sub = FakeSubscriber()
+            subscriptions.append(sub)
+            return sub
+        monitor = MotorFeedbackMonitor(monotonic=self.clock, crc_validator=self.validator,
+                                       subscriber_factory=factory)
+        monitor.start()
+        old_generation = monitor._generation
+        monitor.close()
+        monitor.start()
+        subscriptions[-1].handler(message(100))
+        before = monitor.snapshot()
+        self.assertFalse(monitor._begin_recovery("late reconnect", old_generation))
+        self.assertEqual(monitor.snapshot(), before)
+        monitor.close()
+
+    def test_validation_started_before_recovery_cannot_enter_new_epoch(self):
+        entered, release = threading.Event(), threading.Event()
+        def validate(_msg):
+            entered.set()
+            release.wait(1)
+            return True
+        monitor = MotorFeedbackMonitor(monotonic=self.clock, crc_validator=validate)
+        results = []
+        worker = threading.Thread(target=lambda: results.append(monitor.feed(message(9000))))
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        monitor._begin_recovery("reader changed", 0)
+        release.set()
+        worker.join(1)
+        self.assertEqual(results, [False])
+        self.assertIsNone(monitor._candidate_tick)
+        self.assertFalse(monitor.snapshot()["crc_valid"])
+
+    def test_invalid_received_frames_are_not_accepted_by_reader_watchdog(self):
+        sub = FakeSubscriber()
+        monitor = MotorFeedbackMonitor(monotonic=self.clock, crc_validator=self.validator,
+                                       subscriber_factory=lambda *_: sub)
+        monitor.start()
+        self.assertTrue(sub.handler(message(100)))
+        self.clock.advance(.11)
+        broken = message(101)
+        broken.crc_ok = False
+        self.assertFalse(sub.handler(broken))
+        self.assertFalse(monitor.snapshot()["crc_valid"])
+        monitor.close()
+
+    def test_polling_rebuilds_after_rejected_ticks_then_recovers_reset_stream(self):
+        self.monitor.feed(message(5000))
+        self.clock.advance(.11)
+        old_channel, new_channel = Mock(), Mock()
+        completed = threading.Event()
+        old_channel.Read.side_effect = lambda **_: (self.clock.advance(.11), message(5000))[1]
+        ticks = iter((1, 1, 1, 2, 3, 4))
+        def read_new(**_):
+            self.clock.advance(.11)
+            return message(next(ticks, 5))
+        new_channel.Read.side_effect = read_new
+        created = []
+        def create():
+            self.assertEqual(old_channel.CloseReader.call_count, 1)
+            created.append(new_channel)
+            return new_channel
+        def receive(msg):
+            result = self.monitor._receive(msg, 0)
+            if result and msg.tick < 5000:
+                completed.set()
+            return result
+        reader = _PollingSubscriber(old_channel, object(), .001, channel_factory=create,
+                                    on_reconnect=lambda reason: self.monitor._begin_recovery(reason, 0),
+                                    monotonic=self.clock, recovery_after=.5)
+        reader.Init(receive, 10)
+        try:
+            self.assertTrue(completed.wait(1))
+            self.assertEqual(len(created), 1)
+            self.assertTrue(self.monitor.snapshot()["crc_valid"])
+            self.assertEqual(self.monitor.snapshot()["stream_epoch"], 1)
+            old_channel.SetWriter.assert_not_called()
+            new_channel.SetWriter.assert_not_called()
+        finally:
+            reader.Close()
+
+    def test_polling_retries_factory_failure_with_bounded_interval(self):
+        channel = Mock()
+        channel.Read.return_value = None
+        attempted = threading.Event()
+        times = []
+        def create():
+            times.append(time.monotonic())
+            if len(times) >= 2:
+                attempted.set()
+            raise OSError("reader unavailable")
+        reader = _PollingSubscriber(channel, object(), .002, channel_factory=create,
+                                    on_reconnect=lambda _: True, recovery_after=.03)
+        reader.Init(lambda _: False, 10)
+        try:
+            self.assertTrue(attempted.wait(1))
+            self.assertGreaterEqual(times[1] - times[0], .03)
+            channel.CloseReader.assert_called_once()
+        finally:
+            reader.Close()
+
+    def test_close_during_factory_wait_does_not_start_new_reader(self):
+        entered, release = threading.Event(), threading.Event()
+        channel, replacement = Mock(), Mock()
+        channel.Read.return_value = None
+        def create():
+            entered.set()
+            release.wait(1)
+            return replacement
+        reader = _PollingSubscriber(channel, object(), .002, channel_factory=create,
+                                    on_reconnect=lambda _: True, recovery_after=.01)
+        reader.Init(lambda _: False, 10)
+        self.assertTrue(entered.wait(1))
+        closer = threading.Thread(target=reader.Close)
+        closer.start()
+        self.assertTrue(reader._stop.wait(1))
+        release.set()
+        closer.join(1)
+        self.assertFalse(closer.is_alive())
+        replacement.SetReader.assert_not_called()
+        replacement.CloseReader.assert_called_once()
+
+    def test_refused_generation_recovery_does_not_create_reader(self):
+        channel = Mock()
+        channel.Read.return_value = None
+        create = Mock()
+        reader = _PollingSubscriber(channel, object(), .002, channel_factory=create,
+                                    on_reconnect=lambda _: False, recovery_after=.01)
+        reader.Init(lambda _: False, 10)
+        reader._thread.join(1)
+        self.assertFalse(reader._thread.is_alive())
+        create.assert_not_called()
+        reader.Close()
+
+    def test_failed_reader_close_blocks_restart_until_close_is_confirmed(self):
+        subscriptions = []
+        def factory(*_):
+            sub = FakeSubscriber()
+            subscriptions.append(sub)
+            return sub
+        monitor = MotorFeedbackMonitor(monotonic=self.clock, crc_validator=self.validator,
+                                       subscriber_factory=factory)
+        monitor.start()
+        subscriptions[0].Close = Mock(side_effect=RuntimeError("read still active"))
+        self.assertFalse(monitor.close())
+        with self.assertRaisesRegex(RuntimeError, "終了していない"):
+            monitor.start()
+        self.assertEqual(len(subscriptions), 1)
+        self.assertFalse(subscriptions[0].handler(message()))
+        subscriptions[0].Close = Mock()
+        self.assertTrue(monitor.close())
+        monitor.start()
+        self.assertEqual(len(subscriptions), 2)
+        monitor.close()
 
 
 if __name__ == "__main__":

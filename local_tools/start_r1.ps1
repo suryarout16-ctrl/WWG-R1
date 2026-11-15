@@ -63,7 +63,7 @@ function Stop-IdlePanel($proc) {
     $localReplyWait = -not $Offline -and -not $Stop -and $state.local -and $state.connection_kind -eq "local" -and
         -not $state.virtual -and -not $state.dds_address -and $state.body.dry -and $state.posture.dry -and
         $state.training.active -and $state.training.phase -eq "await_reply" -and $state.training.awaiting_reply
-    $working = $state.busy -or $state.body.busy -or $state.body.hold_active -or $state.body.stop_required -or
+    $working = $state.busy -or $state.body.busy -or $state.body.stopping -or $state.body.hold_active -or $state.body.stop_required -or
         $state.posture.busy -or $state.recording -or $state.call.active -or $state.call.input_closing
     if ($localReplyWait -and -not $working) {
         Say "ローカル研修の返答待ちを終了して、実機用へ切り替えます" "Cyan"
@@ -77,10 +77,21 @@ function Stop-IdlePanel($proc) {
             throw "切替前のローカル状態を確認できません。パネルは終了しません"
         }
     }
-    if ($state.busy -or $state.body.busy -or $state.body.hold_active -or $state.body.stop_required -or
+    # 明示的な実機再起動では、新プロセスにも停止未確認ロックを引き継ぐ。
+    # 引数に確実にロック要求が含まれる場合だけ、旧stop_requiredを終了拒否から除く。
+    $keepStopInterlock = $state.body.stop_required -and $Restart -and -not $Offline -and -not $Stop -and
+        (@($pargs) -contains "--require-stop-verification") -and
+        $state.connection_kind -eq "robot" -and -not $state.local -and -not $state.virtual -and
+        $state.fsm_ok -and $state.dds_address -eq $PcIp -and
+        $state.body.dry -eq $false -and $state.posture.dry -eq $false
+    if ($state.busy -or $state.body.busy -or $state.body.stopping -or $state.body.hold_active -or
+        ($state.body.stop_required -and -not $keepStopInterlock) -or
         $state.posture.busy -or $state.training.active -or $state.recording -or
         $state.call.active -or $state.call.input_closing) {
         throw "パネルを使用中です。通話・研修を終了し、動作が終わってから再実行してください"
+    }
+    if ($keepStopInterlock) {
+        Say "停止未確認のロックを新しい実機パネルへ引き継ぎます。復旧後に停止を再確認してください" "Yellow"
     }
     Say "待機中のパネルを終了します (PID $($proc.ProcessId))" "Yellow"
     & taskkill.exe /PID $proc.ProcessId /T /F | Out-Null
@@ -128,6 +139,9 @@ try {
         $PanelLabel = "R1未接続のローカル試験パネル"
         $values.Remove("-i"); $values.Remove("--dds-address")
         $values["--local"] = $null
+    }
+    else {
+        $values["--require-stop-verification"] = $null
     }
     $pargs = @("-X", "utf8", "-B", "r1_chat\web_ui.py")
     foreach ($entry in $values.GetEnumerator()) {

@@ -164,6 +164,8 @@ class Engine:
                                    feedback=self.body_feedback.snapshot if self.body_feedback else None,
                                    require_feedback=self.body_enabled and not args.local,
                                    on_event=lambda event: log("[歩行] " + json.dumps(event, ensure_ascii=False)))
+        if not args.local and getattr(args, "require_stop_verification", False):
+            self.body.require_stop_verification("起動後の停止確認が必要です。新しい状態データで停止を再確認してください")
         self.posture = StandController(None if args.local else self.gesturer.loco, dry=args.local,
                                        motion_lock=self.gesturer.lock,
                                        on_event=lambda event: log("[起立] " + json.dumps(event, ensure_ascii=False)))
@@ -350,6 +352,7 @@ class Engine:
             "hat_action": self.args.hat_action, "hat_fallback": self.args.hat_fallback,
             "body": {**self.body.state(), "enabled": self.body_enabled,
                      "forward_duration": self.forward_duration, "hold_epoch": self.hold_epoch,
+                     "monitor": self._feedback_monitor_state(),
                      "hold_profile": {"linear_speed": self.hold_linear_speed, "yaw_speed": self.hold_yaw_speed,
                                       "heartbeat_ms": 200, "lease_ms": 750}},
             "history": self.history[-60:], "log": list(LOG_LINES)[-120:],
@@ -361,6 +364,16 @@ class Engine:
             "personas": [{"key": k, "label": self._persona_label(k), "ok": self.persona_status[k][0],
                           "detail": self.persona_status[k][1]} for k, v in personas.PERSONAS.items()],
         }
+
+    def _feedback_monitor_state(self):
+        reporter = getattr(self.body_feedback, "diagnostics", None)
+        if not callable(reporter):
+            return None
+        try:
+            result = reporter()
+            return result if isinstance(result, dict) else None
+        except Exception as error:
+            return {"recovering": True, "last_error": type(error).__name__}
 
     def add(self, role: str, text: str, **extra) -> None:
         self.history.append({"role": role, "text": text, "time": time.strftime("%H:%M:%S"), **extra})
@@ -1136,6 +1149,8 @@ def main() -> None:
     p.add_argument("--motion", action=argparse.BooleanOptionalAction, default=True,
                    help="会話ごとにStrataが身ぶりを選ぶ（既定オン、--no-motionでオフ）")
     p.add_argument("--body-control", action="store_true", help="実機で短時間の歩行・旋回を有効にする（ローカルは常にプレビュー可）")
+    p.add_argument("--require-stop-verification", action="store_true",
+                   help="実機の歩行をロックして起動し、ゼロ速度後の新しい静止確認で解除する")
     p.add_argument("--velocity-127-compatible", action="store_true", help="7105の応答127に互換対応する。実際の動作・停止確認は別途必要")
     p.add_argument("--forward-speed", type=float, default=0.1,
                    help="前進だけの速度（0より大きく0.3m/s以下、既定0.1）")

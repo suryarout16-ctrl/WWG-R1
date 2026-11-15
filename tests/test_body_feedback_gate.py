@@ -219,6 +219,136 @@ class FeedbackGateTests(unittest.TestCase):
                 self.assertTrue(state["physical_confirmation_required"])
                 self.assertEqual(state["joint_stationary_observed_at"], observed_at)
 
+    def test_recovering_observer_blocks_motion_before_generic_crc_error(self):
+        self.fault = lambda _now, _moving: {"recovering": True, "crc_valid": False,
+                                          "error": "reader recovery", "stream_epoch": 2}
+        controller = self.make()
+        self.assertEqual(controller.state()["feedback_status"], "recovering")
+        self.assertFalse(controller.move("forward")[0])
+        self.loco._Call.assert_not_called()
+
+    def test_stationary_window_restarts_when_reader_epoch_changes(self):
+        self.fault = lambda now, moving: {
+            "stream_epoch": 1 if moving or now - self.stop_t < .3 else 2}
+        controller = self.make()
+        state = self.run_move(controller)
+        self.assertTrue(state["joint_stationary_observed"])
+        self.assertEqual(state["joint_stationary_stream_epoch"], 2)
+        self.assertGreaterEqual(self.clock() - self.stop_t, .79)
+
+    def test_frequent_reader_epochs_cannot_be_combined_into_quiet_proof(self):
+        self.fault = lambda now, moving: {
+            "stream_epoch": 0 if moving else int((now - self.stop_t) / .25)}
+        controller = self.make()
+        state = self.run_move(controller)
+        self.assertFalse(state["joint_stationary_observed"])
+        self.assertTrue(state["stop_required"])
+
+    def test_prior_quiet_is_not_reported_for_a_new_reader_epoch(self):
+        self.fault = lambda _now, _moving: {"stream_epoch": 1}
+        controller = self.make()
+        self.assertTrue(controller.stop()[0])
+        observed = controller.state()
+        self.assertTrue(observed["joint_stationary_observed"])
+        self.fault = lambda _now, _moving: {"stream_epoch": 2}
+        current = controller.state()
+        self.assertFalse(current["joint_stationary_observed"])
+        self.assertEqual(current["feedback_status"], "stream_changed")
+        self.assertEqual(current["feedback_stream_epoch"], 2)
+        self.assertIsNone(current["joint_stationary_stream_epoch"])
+        self.assertTrue(current["physical_confirmation_required"])
+
+    def test_recent_quiet_cache_cannot_confirm_a_new_epoch_from_one_frame(self):
+        self.fault = lambda _now, _moving: {"stream_epoch": 1}
+        controller = self.make()
+        self.assertTrue(controller.stop()[0])
+        frozen = self.feedback()
+        frozen["stream_epoch"] = 2
+        controller.feedback = lambda: frozen
+        # The previous proof is less than .1s old, but belongs to another reader.
+        self.assertFalse(controller._verify_stationary())
+        self.assertFalse(controller.state()["joint_stationary_observed"])
+
+    def test_invalid_epoch_metadata_cannot_bypass_feedback_gate(self):
+        for value in (-1, True, "2", [], 2.5):
+            with self.subTest(epoch=value):
+                self.fault = lambda _now, _moving, epoch=value: {"stream_epoch": epoch}
+                controller = self.make()
+                self.assertEqual(controller.state()["feedback_status"], "invalid_stream_epoch")
+                self.assertFalse(controller.move("forward")[0])
+        self.loco._Call.assert_not_called()
+
+    def test_explicit_interlock_is_visible_without_a_move_and_only_stop_clears_it(self):
+        controller = self.make()
+        controller.require_stop_verification("通信復旧後の停止確認")
+        state = controller.state()
+        self.assertTrue(state["stop_required"])
+        self.assertEqual(state["status"], "stop_verification_required")
+        self.assertIn("通信復旧後", state["error"])
+        self.assertTrue(state["physical_confirmation_required"])
+        self.assertFalse(controller.move("forward")[0])
+        self.assertFalse(controller.start_hold("forward", "a" * 16)[0])
+        self.loco._Call.assert_not_called()
+        self.assertTrue(controller.stop()[0])
+        state = controller.state()
+        self.assertFalse(state["stop_required"])
+        self.assertEqual(state["stop_verification_reason"], "")
+        self.assertEqual(state["error"], "")
+        self.assertTrue(state["joint_stationary_observed"])
+        self.assertTrue(all(row["velocity"] == [0, 0, 0] for row in self.payloads()))
+
+    def test_fresh_feedback_or_an_automatic_stop_cannot_clear_explicit_interlock(self):
+        controller = self.make()
+        controller.require_stop_verification("担当者による再確認")
+        for _ in range(10):
+            self.clock.t += .1
+            self.assertTrue(controller.state()["feedback_valid"])
+            self.assertTrue(controller.state()["stop_required"])
+        _, confirmed = controller._finish_stop(None, force=True)
+        self.assertFalse(confirmed)
+        self.assertTrue(controller.state()["stop_required"])
+        self.assertTrue(controller.stop()[0])
+        self.assertFalse(controller.state()["stop_required"])
+
+    def test_stale_feedback_does_not_clear_explicit_interlock(self):
+        frozen = self.feedback()
+        self.clock.t += 1
+        controller = self.make(feedback=lambda: frozen)
+        controller.require_stop_verification("通信復旧後の再確認")
+        self.assertFalse(controller.stop()[0])
+        state = controller.state()
+        self.assertTrue(state["stop_required"])
+        self.assertEqual(state["stop_verification_reason"], "通信復旧後の再確認")
+        self.assertFalse(state["joint_stationary_observed"])
+        self.assertTrue(all(row["velocity"] == [0, 0, 0] for row in self.payloads()))
+
+    def test_an_inflight_stop_cannot_clear_a_newer_interlock(self):
+        controller = self.make()
+        triggered = False
+
+        def feedback():
+            nonlocal triggered
+            if self.stop_t is not None and self.clock() - self.stop_t >= .2 and not triggered:
+                triggered = True
+                controller.require_stop_verification("新しい通信復旧")
+            return self.feedback()
+
+        controller.feedback = feedback
+        self.assertFalse(controller.stop()[0])
+        self.assertTrue(triggered)
+        self.assertTrue(controller.state()["stop_required"])
+        self.assertFalse(controller.state()["joint_stationary_observed"])
+        self.assertEqual(controller.state()["stop_verification_reason"], "新しい通信復旧")
+        self.assertTrue(controller.stop()[0])
+        self.assertFalse(controller.state()["stop_required"])
+
+    def test_explicit_interlock_needs_feedback_even_with_an_accepted_zero_rpc(self):
+        controller = BodyController(self.loco, dry=False, monotonic=self.clock,
+                                    wait=self.clock.wait)
+        controller.require_stop_verification("関節監視なしでは停止確認できない")
+        self.assertFalse(controller.stop()[0])
+        self.assertTrue(controller.state()["stop_required"])
+
 
 if __name__ == "__main__":
     unittest.main()

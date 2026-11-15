@@ -20,7 +20,7 @@ $launcherAst = [Management.Automation.Language.Parser]::ParseFile(
 if ($parseErrors) { throw 'Launcher syntax could not be parsed' }
 
 # Import declarations only. The launcher main block, LAN checks and startup never run.
-foreach ($name in @('Get-PanelPort', 'Assert-Physical', 'Stop-IdlePanel')) {
+foreach ($name in @('Get-PanelPort', 'Assert-Physical', 'Stop-IdlePanel', 'Test-TargetPanel')) {
     $found = @($launcherAst.FindAll({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -34,6 +34,8 @@ $script:Cases = 0
 $PcIp = '192.168.123.164'
 $Offline = $false
 $Stop = $false
+$Restart = $false
+$pargs = @()
 $proc = [pscustomobject]@{ ProcessId = 424242; CommandLine = 'python web_ui.py --port 8770' }
 
 function Say { param($Message, $Color) }
@@ -63,7 +65,7 @@ function New-State([string]$Kind = 'local') {
         call = [pscustomobject]@{ active = $false; input_closing = $false }
         training = [pscustomobject]@{ active = $false; phase = 'idle'; awaiting_reply = $false }
         body = [pscustomobject]@{
-            dry = $isLocal; busy = $false; hold_active = $false; stop_required = $false
+            dry = $isLocal; busy = $false; stopping = $false; hold_active = $false; stop_required = $false
         }
         posture = [pscustomobject]@{ dry = $isLocal; busy = $false }
     }
@@ -84,6 +86,8 @@ function Reset-Mocks {
     $script:PostOk = $true
     $script:Offline = $false
     $script:Stop = $false
+    $script:Restart = $false
+    $script:pargs = @()
 }
 function Assert($Condition, [string]$Message) {
     $script:Checks++
@@ -151,6 +155,7 @@ $blockedChanges = [ordered]@{
     'manual recording' = { param($s) $s.recording = $true }
     'reply in progress' = { param($s) $s.busy = 'reply' }
     'body busy' = { param($s) $s.body.busy = $true }
+    'stop verification in progress' = { param($s) $s.body.stopping = $true }
     'held movement' = { param($s) $s.body.hold_active = $true }
     'stop required' = { param($s) $s.body.stop_required = $true }
     'posture busy' = { param($s) $s.posture.busy = $true }
@@ -199,6 +204,92 @@ foreach ($changedKind in @('robot', 'virtual', 'missing', 'still waiting', 'new 
         $script:States.Enqueue($after)
         Assert-Refused
         Assert ($script:Posts.Count -eq 1) 'Only the initially verified local panel may receive a request'
+    }
+}
+
+Run-Case 'Physical target is ready while its motion interlock remains latched' {
+    $state = New-State 'robot'
+    $state.body.stop_required = $true
+    Assert (Test-TargetPanel $state) 'Readiness must not require the motion interlock to be cleared'
+}
+Run-Case 'Normal launch must not discard a physical stop interlock' {
+    $state = New-State 'robot'
+    $state.body.stop_required = $true
+    $script:pargs = @('--require-stop-verification')
+    $script:States.Enqueue($state)
+    Assert-Refused
+    Assert ($script:Posts.Count -eq 0) 'No physical cancellation request is allowed'
+}
+Run-Case 'Explicit physical restart carries the stop interlock into the replacement' {
+    $state = New-State 'robot'
+    $state.body.stop_required = $true
+    $script:Restart = $true
+    $script:pargs = @('--port', '8770', '--require-stop-verification')
+    $script:States.Enqueue($state)
+    Stop-IdlePanel $proc
+    Assert ($script:Kills.Count -eq 1) 'Verified idle physical process should be replaced once'
+    Assert ($script:Posts.Count -eq 0) 'Restart must not automatically send zero or cancellation'
+    Assert $state.body.stop_required 'The old interlock must not be acknowledged or modified'
+}
+foreach ($incoming in @(@(), @('--require-stop-verification=false'), @('--require-stop-verification-extra'))) {
+    Run-Case "Restart without an exact incoming interlock flag is refused: $($incoming -join ' ')" {
+        $state = New-State 'robot'
+        $state.body.stop_required = $true
+        $script:Restart = $true
+        $script:pargs = $incoming
+        $script:States.Enqueue($state)
+        Assert-Refused
+        Assert ($script:Posts.Count -eq 0) 'No automatic physical stop or acknowledgement is allowed'
+    }
+}
+foreach ($mode in @('Offline', 'Stop')) {
+    Run-Case "$mode cannot discard an interlock even with Restart and an incoming flag" {
+        $state = New-State 'robot'
+        $state.body.stop_required = $true
+        $script:Restart = $true
+        $script:pargs = @('--require-stop-verification')
+        Set-Variable -Name $mode -Scope Script -Value $true
+        $script:States.Enqueue($state)
+        Assert-Refused
+        Assert ($script:Posts.Count -eq 0) 'No physical stop request is allowed'
+    }
+}
+foreach ($kind in @('local', 'virtual')) {
+    Run-Case "$kind interlock is not covered by physical restart recovery" {
+        $state = New-State $kind
+        $state.body.stop_required = $true
+        $script:Restart = $true
+        $script:pargs = @('--require-stop-verification')
+        $script:States.Enqueue($state)
+        Assert-Refused
+        Assert ($script:Posts.Count -eq 0) 'Recovery must not send a cancellation request'
+    }
+}
+$physicalBlockedChanges = [ordered]@{
+    'call active' = { param($s) $s.call.active = $true }
+    'input closing' = { param($s) $s.call.input_closing = $true }
+    'manual recording' = { param($s) $s.recording = $true }
+    'reply in progress' = { param($s) $s.busy = 'reply' }
+    'body busy' = { param($s) $s.body.busy = $true }
+    'stop verification in progress' = { param($s) $s.body.stopping = $true }
+    'held movement' = { param($s) $s.body.hold_active = $true }
+    'posture busy' = { param($s) $s.posture.busy = $true }
+    'training active' = { param($s) $s.training.active = $true }
+    'FSM read failed' = { param($s) $s.fsm_ok = $false }
+    'DDS address mismatch' = { param($s) $s.dds_address = '192.0.2.123' }
+    'body marked as preview' = { param($s) $s.body.dry = $true }
+    'posture marked as preview' = { param($s) $s.posture.dry = $true }
+}
+foreach ($entry in $physicalBlockedChanges.GetEnumerator()) {
+    Run-Case "Physical restart with $($entry.Key) is refused despite incoming interlock" {
+        $state = New-State 'robot'
+        $state.body.stop_required = $true
+        & $entry.Value $state
+        $script:Restart = $true
+        $script:pargs = @('--require-stop-verification')
+        $script:States.Enqueue($state)
+        Assert-Refused
+        Assert ($script:Posts.Count -eq 0) 'No cancellation or zero request should be sent'
     }
 }
 
