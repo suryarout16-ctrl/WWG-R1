@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>R1 操作パネル</title>
+<title>研修担当R1</title>
 <style>
 :root {
   --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2330; --muted: #677085; --line: #e1e4ea;
@@ -19,6 +19,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 15px/1.6 "Yu Gothic UI", "Meiryo", system-ui, sans-serif; }
 header { display: flex; align-items: center; gap: 12px; padding: 12px 16px;
@@ -48,12 +49,23 @@ button { font: inherit; border: 1px solid var(--line); background: var(--bg); co
 button:hover { border-color: var(--accent); }
 button:disabled { opacity: .45; cursor: not-allowed; }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-#mic { width: 100%; padding: 18px; font-size: 18px; font-weight: 700; border-radius: 12px; }
+#call { width: 100%; padding: 18px; font-size: 18px; font-weight: 700; border-radius: 12px; }
+#call.on { background: var(--rec); border-color: var(--rec); color: #fff; }
+#mic { width: 100%; margin-top: 8px; }
 #mic.on { background: var(--rec); border-color: var(--rec); color: #fff; }
+.meter { width: 100%; height: 8px; margin-top: 10px; }
+textarea { width: 100%; min-height: 130px; padding: 10px; color: var(--ink); background: var(--bg);
+  font: inherit; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
+.materials-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.material { display: flex; align-items: center; gap: 8px; background: var(--bg); padding: 4px 10px; border-radius: 8px; }
+.material button { padding: 2px 8px; }
+summary { cursor: pointer; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .grid button { padding: 10px 6px; font-size: 14px; }
 .grid button.release { grid-column: 1 / -1; font-weight: 700; }
+#bodyButtons button { touch-action: none; user-select: none; -webkit-user-select: none; }
+#bodyButtons button.held { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .side { display: flex; flex-direction: column; gap: 16px; }
 .personas { display: flex; flex-direction: column; gap: 8px; }
 .personas button { display: flex; justify-content: space-between; align-items: center; text-align: left; }
@@ -78,7 +90,7 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 </head>
 <body>
 <header>
-  <h1>R1 操作パネル</h1>
+  <h1>新人研修 · 熟練工R1</h1>
   <span class="busy" id="busy"></span>
   <span class="chip" id="fsm"><span class="dot"></span><span id="fsmText">—</span></span>
 </header>
@@ -94,14 +106,38 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
   </section>
   <div class="side">
     <section class="card">
+      <h2>作業の説明と実演</h2>
+      <button class="primary" id="trainingStart">説明と見本から研修を開始</button>
+      <button id="trainingStop" style="margin-top:8px">研修を中断</button>
+      <div id="trainingStatus" class="hint">見本の後は、新人へ一つ質問して返答を待ちます</div>
+      <div class="hint">通話を開始しておくと、質問の後にそのまま声で答えられます。仮想R1では短い前進も見本に含めます</div>
+    </section>
+    <section class="card">
       <h2>人格</h2>
       <div id="personas" class="personas"></div>
       <div class="hint" id="personaHint"></div>
+      <label class="hint" for="mentorBackend">研修担当R1の応答先</label>
+      <select id="mentorBackend" style="width:100%;margin-top:6px;padding:8px">
+        <option value="strata">Z840 Strata</option>
+        <option value="openai">GPT API（従量課金）</option>
+      </select>
+      <div class="hint" id="mentorBackendHint">人格・教材・会話を引き継いで切り替えます</div>
     </section>
     <section class="card">
-      <h2>マイク（この PC）</h2>
-      <button id="mic">🎙 録音開始</button>
-      <div class="hint">押して話し、もう一度押すと送信。入力欄の外ならスペースキーでも操作できます</div>
+      <h2>音声通話（このPCのマイク）</h2>
+      <button class="primary" id="call">通話を開始</button>
+      <div id="callStatus" class="hint">開始すると、話し終わりを検知して自動で会話します</div>
+      <div id="callMic" class="hint"></div>
+      <meter class="meter" id="level" min="0" max="0.12" value="0" aria-label="マイクの音量"></meter>
+      <div class="hint">R1の返事が終わると、再び聞き取ります。聞き直しはそのまま話してください</div>
+      <details style="margin-top:10px"><summary>マイクの感度を調整する</summary>
+        <label class="hint" for="threshold">周囲の音を拾いすぎる場合は、右へ動かしてください</label>
+        <input id="threshold" type="range" min="0.002" max="0.1" step="0.002" value="0.012" style="width:100%">
+      </details>
+      <details style="margin-top:10px"><summary>一回ずつ録音する</summary>
+        <button id="mic">録音開始</button>
+        <div class="hint">押して話し、もう一度押すと送信。通話中は使えません</div>
+      </details>
     </section>
     <section class="card">
       <h2>身ぶり</h2>
@@ -111,16 +147,58 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
       </div>
       <div class="grid" id="buttons"></div>
       <div class="hint">R1 が Running（自立）のときだけ送ります。握手・ハイタッチは手を出したまま止まるので「腕を戻す」で戻します（20 秒で自動でも戻る）</div>
+      <div class="hint">帽子の身ぶりは実機で登録した専用動作を使います。未登録の場合は送りません</div>
+    </section>
+    <section class="card">
+      <h2>歩行・旋回</h2>
+      <div id="bodyState" class="hint">状態を確認しています</div>
+      <div id="bodyProfile" class="hint"></div>
+      <div class="grid" id="bodyButtons">
+        <button data-body="move_forward">前へ（押している間）</button>
+        <button data-body="move_backward">後ろへ（押している間）</button>
+        <button data-body="move_left">左へ横移動（押している間）</button>
+        <button data-body="move_right">右へ横移動（押している間）</button>
+        <button data-body="turn_left">左へ旋回（押している間）</button>
+        <button data-body="turn_right">右へ旋回（押している間）</button>
+      </div>
+      <button id="bodyStop" style="width:100%;margin-top:8px">歩行を停止</button>
+      <div class="hint">押している間だけ速度指令を更新し、離すとゼロ速度を送ります。画面を離れた場合や通信が途切れた場合も更新を止めます。キーボードはボタンに移動し、スペースかEnterを押している間だけ操作できます。実際の移動と停止は目視でも確認してください。距離指定や障害物の検知は行いません</div>
+    </section>
+    <section class="card">
+      <h2>脱力からの起立</h2>
+      <select id="standPosture" aria-label="現在の姿勢" style="width:100%;padding:8px">
+        <option value="">現在の姿勢を選択</option>
+        <option value="supine">仰向けに寝ている</option>
+      </select>
+      <label class="hint" style="display:block;margin-top:8px"><input type="checkbox" id="standReady"> 現在の姿勢と起立の準備を確認済み</label>
+      <div class="hint">実機ではコントローラー担当者・周囲2m以上の空間・スタッフの許可を確認してください。吊り下げからの起立はこのボタンの対象外です</div>
+      <button id="standUp" style="margin-top:8px">仰向けから起立</button>
+      <button id="standCancel" style="margin-top:8px">後続手順を中断</button>
+      <div id="standStatus" class="hint">姿勢はモード番号だけでは判別しません</div>
+      <div class="hint">チャットでも「仰向けで準備確認済み、起立して」と明示できます。中断は後続指令の取り消しです。緊急停止はコントローラーで行ってください</div>
     </section>
     <section class="card">
       <h2>操作</h2>
       <div class="input-row" style="margin-top:0">
-        <button id="greet">あいさつ（手を振る）</button>
+      <button id="greet">自己紹介をお願い</button>
         <button id="reset">会話をリセット</button>
       </div>
       <p class="notice"><b>緊急停止はコントローラーの E-Stop</b>（無ければ L2+B を 5 秒長押し）。このパネルでは止めません。</p>
     </section>
   </div>
+  <section class="card" style="grid-column: 1 / -1">
+    <h2>新人研修の台本・作業指示書</h2>
+    <div id="materials" class="materials-list"></div>
+    <details id="materialEditor"><summary>資料を読み込む</summary>
+      <div class="input-row">
+        <input id="materialName" placeholder="資料名（例：架空の作業指示書）" maxlength="100" aria-label="資料名">
+        <input id="materialFile" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="テキスト資料を選ぶ">
+      </div>
+      <textarea id="materialText" placeholder="台本や作業指示書の本文を貼り付けてください" maxlength="8000" aria-label="資料の本文"></textarea>
+      <button class="primary" id="materialAdd">研修資料として読み込む</button>
+    </details>
+    <div class="hint">テキスト・Markdown、または本文の貼り付けに対応。1件8,000文字、合計12,000文字。変更すると会話はリセットされます。資料はこのPC内に保存します</div>
+  </section>
   <section class="card" style="grid-column: 1 / -1">
     <h2>ログ</h2>
     <pre id="log"></pre>
@@ -129,7 +207,102 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 <div id="toast"></div>
 <script>
 const $ = (id) => document.getElementById(id);
-let state = null, lastHistory = -1, lastLog = "";
+let state = null, lastHistory = "", lastLog = "", lastMaterials = "";
+let activeBodyHold = null;
+const pendingBodyHolds = new Set();
+
+async function bodyHoldRequest(path, body, timeoutMs = 1000, keepalive = false) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body), signal: controller.signal, keepalive});
+    return await response.json();
+  } finally { clearTimeout(timer); }
+}
+
+function releaseBodyHold(hold, leaving = false) {
+  const body = {token: hold.token};
+  // A release may precede a delayed start; the server retires this token too.
+  if (leaving && navigator.sendBeacon) {
+    try {
+      if (navigator.sendBeacon("/api/body/hold/release", new Blob([JSON.stringify(body)], {type: "application/json"}))) {
+        if (hold.startSettled) pendingBodyHolds.delete(hold);
+        return;
+      }
+    } catch (_) { /* fall through to keepalive */ }
+  }
+  bodyHoldRequest("/api/body/hold/release", body, 1000, true).catch(() => {})
+    .finally(() => { if (hold.startSettled) pendingBodyHolds.delete(hold); });
+}
+
+function finishBodyHold(hold = activeBodyHold, leaving = false) {
+  if (!hold || (hold.ended && !leaving)) return;
+  hold.ended = true;
+  clearTimeout(hold.timer);
+  if (activeBodyHold === hold) activeBodyHold = null;
+  hold.button.classList.remove("held");
+  hold.button.setAttribute("aria-pressed", "false");
+  try {
+    if (hold.pointerId !== undefined && hold.button.hasPointerCapture(hold.pointerId))
+      hold.button.releasePointerCapture(hold.pointerId);
+  } catch (_) { /* pointer may already have gone away */ }
+  releaseBodyHold(hold, leaving);
+  if (state && !leaving) render(state);
+}
+
+function finishAllBodyHolds(leaving = false) {
+  for (const hold of [...pendingBodyHolds]) finishBodyHold(hold, leaving);
+}
+
+async function heartbeatBodyHold(hold) {
+  if (hold.ended || activeBodyHold !== hold) return;
+  try {
+    const result = await bodyHoldRequest("/api/body/hold/heartbeat", {token: hold.token}, 450);
+    if (!result.ok) throw new Error(result.message || "歩行の更新が拒否されました");
+    if (!hold.ended && activeBodyHold === hold)
+      hold.timer = setTimeout(() => heartbeatBodyHold(hold), 200);
+  } catch (_) {
+    if (!hold.ended) toast("歩行の更新が途切れたため、停止を要求しました");
+    finishBodyHold(hold);
+  }
+}
+
+function beginBodyHold(button, input) {
+  if (activeBodyHold || button.disabled || !state || !Number.isInteger(state.body?.hold_epoch)) return;
+  const hold = {button, token: crypto.randomUUID(), epoch: state.body.hold_epoch,
+    pointerId: input.pointerId, key: input.key, ended: false, accepted: false, startSettled: false, timer: null};
+  activeBodyHold = hold;
+  pendingBodyHolds.add(hold);
+  button.classList.add("held");
+  button.setAttribute("aria-pressed", "true");
+  if (hold.pointerId !== undefined) {
+    try { button.setPointerCapture(hold.pointerId); } catch (_) { /* global release listeners still apply */ }
+  }
+  render(state);
+  bodyHoldRequest("/api/body/hold/start", {action: button.dataset.body, token: hold.token, epoch: hold.epoch}, 1500)
+    .then((result) => {
+      hold.startSettled = true;
+      if (!result.ok) {
+        if (!hold.ended) toast(result.message || "歩行を開始できませんでした");
+        finishBodyHold(hold);
+        return;
+      }
+      hold.accepted = true;
+      // Never restart updates after pointerup, blur, Stop, or a newer hold.
+      if (!hold.ended && activeBodyHold === hold) heartbeatBodyHold(hold);
+    })
+    .catch(() => {
+      if (!hold.ended) toast("歩行の開始を確認できないため、停止を要求しました");
+      finishBodyHold(hold);
+    })
+    .finally(() => {
+      hold.startSettled = true;
+      // Repeat after start settles, including release-before-response and response loss.
+      if (hold.ended) releaseBodyHold(hold);
+      refresh();
+    });
+}
 
 async function post(path, body = {}) {
   try {
@@ -158,16 +331,41 @@ function render(s) {
   state = s;
   const [bg, ink] = fsmStyle(s.fsm);
   const chip = $("fsm"); chip.style.background = bg; chip.style.color = ink;
-  $("fsmText").textContent = s.local ? "R1 なし（ローカル）" : (s.fsm_ok ? `${s.fsm} ${s.fsm_name}` : "R1 に届きません");
+  $("fsmText").textContent = s.local ? "R1 なし（ローカル）" :
+    (s.virtual ? "仮想R1 · " : "") + (s.fsm_ok ? `${s.fsm} ${s.fsm_name}` : "R1 に届きません");
   $("busy").textContent = s.recording ? `● 録音中 ${s.rec_s}s` : (s.busy ? `${s.busy}…` : "");
   $("busy").style.color = s.recording ? "var(--rec)" : "var(--warn)";
   $("auto").checked = s.auto_motion;
+  const call = s.call || { active: false };
+  $("call").classList.toggle("on", call.active);
+  $("call").textContent = call.active ? "通話を終了" : "通話を開始";
+  $("call").disabled = !call.active && (!s.stt || !!s.busy || s.recording);
+  $("callStatus").textContent = call.waiting_for_device ? "ヘッドセットの接続待ちです。装着し直すと同じ機器で再接続します" :
+    call.active && s.body?.hold_active ? "歩行・旋回の終了待ちです。ボタンを離すと聞き取りを再開します" :
+    call.error ? `通話エラー: ${call.error}` :
+    call.active ? (call.processing ? "返事を準備中・発話中" : call.listening ? "聞いています。どうぞ話してください" : "待機中") :
+    "開始すると、話し終わりを検知して自動で会話します";
+  $("callMic").textContent = call.microphone?.name ?
+    `入力: ${call.microphone.name} / ${call.microphone.hostapi}` : "";
+  $("level").value = call.level || 0;
+  if (document.activeElement !== $("threshold")) $("threshold").value = call.threshold || 0.012;
 
   const mic = $("mic");
   mic.classList.toggle("on", s.recording);
   mic.textContent = s.recording ? "■ 録音停止して送信" : "🎙 録音開始";
-  mic.disabled = !s.stt || (!s.recording && !!s.busy);
+  mic.disabled = !s.stt || call.active || call.input_closing || (!s.recording && !!s.busy);
   for (const id of ["send", "say", "greet"]) $(id).disabled = !!s.busy || s.recording;
+  $("trainingStart").disabled = !!s.busy || s.recording || s.persona !== "mentor";
+  $("trainingStop").disabled = !s.training?.active;
+  $("trainingStatus").textContent = s.training?.awaiting_reply ?
+    "新人の返答待ちです。分かった手順や難しそうな点を話してください" :
+    s.training?.label || "研修待機";
+  $("standUp").disabled = !!s.busy || s.recording || !s.posture?.enabled ||
+    $("standPosture").value !== "supine" || !$("standReady").checked;
+  $("standCancel").disabled = !s.posture?.busy;
+  $("standStatus").textContent = s.posture?.error || (s.posture?.busy ?
+    `起立手順: ${s.posture.phase}` : s.fsm === 811 ? "現在のモードはRunning（811）です" :
+    `起立手順: ${s.posture?.status || "待機"}`);
 
   const pbox = $("personas");
   if (pbox.children.length !== s.personas.length) {
@@ -184,27 +382,74 @@ function render(s) {
     el.querySelector(".pl").textContent = p.label;
     el.querySelector(".state-dot").style.background = p.ok ? "var(--ok)" : "var(--rec)";
     el.classList.toggle("active", p.key === s.persona);
-    el.title = p.detail; el.disabled = !!s.busy || s.recording;
+    el.title = p.detail; el.disabled = !!s.busy || s.recording || call.active || (s.persona_locked && p.key !== s.persona);
+    el.hidden = s.persona_locked && p.key !== s.persona;
   });
   const cur = s.personas.find((p) => p.key === s.persona);
-  const z = s.personas.find((p) => p.key === "omoshiro");
-  $("personaHint").textContent = `いま: ${cur ? cur.label : s.persona}` + (z && !z.ok ? `　／ Strata: ${z.detail}` : "");
+  const z = s.personas.find((p) => p.key === "mentor");
+  $("personaHint").textContent = `${cur ? cur.label : s.persona}${s.persona_locked ? "に固定" : ""}`;
+  $("mentorBackend").value = s.mentor_backend || "strata";
+  $("mentorBackend").disabled = !!s.busy || s.recording || call.active;
+  $("mentorBackendHint").textContent = z && !z.ok ? `接続確認: ${z.detail}` :
+    `人格・教材・会話は共通です${s.mentor_model ? ` ／ ${s.mentor_model}` : ""}`;
 
   const standing = s.local || s.fsm === 811 || s.fsm === 816;
   const grid = $("buttons");
   if (!grid.children.length) {
     for (const b of s.buttons) {
       const el = document.createElement("button");
-      el.textContent = b.label; el.dataset.key = b.key; el.title = `ID ${b.id}`;
+      el.textContent = b.label; el.dataset.key = b.key; el.title = b.id === null ? "登録済みの専用動作を使います" : `ID ${b.id}`;
       if (b.key === "release") el.className = "release";
       el.onclick = () => post("/api/gesture", { key: b.key });
       grid.appendChild(el);
     }
   }
-  for (const el of grid.children) el.disabled = !standing && el.dataset.key !== "release";
+  for (const el of grid.children) el.disabled = !!s.busy || s.recording || (!standing && el.dataset.key !== "release");
+  const body = s.body || { enabled: false, busy: false };
+  const holdProfile = body.hold_profile || {linear_speed: 0.9, yaw_speed: 1.8};
+  $("bodyProfile").textContent = body.enabled ?
+    `押下中の速度：前後・左右 ${holdProfile.linear_speed} m/s、旋回 ${holdProfile.yaw_speed} rad/s。実際の距離を保証する値ではありません。` : "";
+  const bodyRunning = s.local || (s.fsm_ok && s.fsm === 811);
+  const feedbackReady = !body.require_feedback || body.feedback_valid;
+  const bodyReady = body.enabled && bodyRunning && feedbackReady && Number.isInteger(body.hold_epoch);
+  if (activeBodyHold && (!body.enabled || !bodyRunning || !feedbackReady || body.stop_required ||
+      body.hold_epoch !== activeBodyHold.epoch)) finishBodyHold(activeBodyHold);
+  for (const el of $("bodyButtons").children) {
+    const isHeld = activeBodyHold?.button === el;
+    // Disabling a captured button can discard its pointer/key release events.
+    el.disabled = isHeld ? false : !bodyReady || !!s.busy || s.recording || body.busy || body.stop_required || !!activeBodyHold;
+  }
+  $("bodyStop").disabled = !body.enabled;
+  const previousStop = body.joint_stationary_observed ? "ゼロ指令後の脚の静止を観測。" : "";
+  const native127 = body.code === 127 || body.stop_code === 127;
+  $("bodyState").textContent = body.error ? body.error : activeBodyHold ?
+    (activeBodyHold.accepted ? "押下歩行中。ボタンを離すと停止指令を送ります" : "押下歩行の開始を確認中") :
+    body.busy ? "指令送信・ゼロ指令後の状態を確認中" :
+    !body.enabled ? "歩行は無効です" : s.local ? "実機へ送らないプレビュー" : !bodyRunning ? "Running状態の確認が必要です" :
+    !feedbackReady ? "脚の状態を確認できないため、移動指令を送りません" :
+    previousStop + (native127 ? "R1応答127。機体の移動は未確認です" : "状態監視は有効です。押している間だけ速度指令を更新します");
+  $("reset").disabled = !!s.busy || s.recording || call.active;
 
-  if (s.history.length !== lastHistory) {
-    lastHistory = s.history.length;
+  const materialSignature = JSON.stringify(s.materials || []);
+  if (materialSignature !== lastMaterials) {
+    lastMaterials = materialSignature;
+    const box = $("materials"); box.replaceChildren();
+    if (!s.materials?.length) box.textContent = "まだ資料は読み込まれていません";
+    for (const doc of s.materials || []) {
+      const row = document.createElement("div"); row.className = "material";
+      const label = document.createElement("span"); label.textContent = `${doc.name} (${doc.chars}文字)`;
+      const remove = document.createElement("button"); remove.textContent = "削除";
+      remove.onclick = () => post("/api/materials/remove", { id: doc.id });
+      row.append(label, remove); box.appendChild(row);
+    }
+  }
+  const materialBusy = !!s.busy || s.recording || call.active;
+  for (const id of ["materialName", "materialText", "materialFile", "materialAdd"]) $(id).disabled = materialBusy;
+  for (const button of $("materials").querySelectorAll("button")) button.disabled = materialBusy;
+
+  const historySignature = JSON.stringify(s.history);
+  if (historySignature !== lastHistory) {
+    lastHistory = historySignature;
     const h = $("history"); h.innerHTML = "";
     if (!s.history.length) h.innerHTML = '<div class="empty">文字かマイクで R1 に話しかけてください</div>';
     for (const m of s.history) {
@@ -231,7 +476,7 @@ function render(s) {
 
 async function refresh() {
   try { render(await (await fetch("/api/state")).json()); }
-  catch (e) { $("fsmText").textContent = "パネルのサーバーが止まっています"; }
+  catch (e) { finishAllBodyHolds(); $("fsmText").textContent = "パネルのサーバーが止まっています"; }
 }
 
 async function send(path) {
@@ -244,11 +489,85 @@ $("send").onclick = () => send("/api/chat");
 $("say").onclick = () => send("/api/say");
 $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) send("/api/chat"); });
 $("mic").onclick = toggleMic;
+$("call").onclick = () => post(state?.call?.active ? "/api/call/stop" : "/api/call/start");
+$("threshold").onchange = (e) => post("/api/call/threshold", { value: Number(e.target.value) });
 $("greet").onclick = () => post("/api/greet");
+$("trainingStart").onclick = () => post("/api/training/start");
+$("trainingStop").onclick = () => post("/api/training/stop");
+$("standUp").onclick = async () => {
+  const posture = $("standPosture").value, ready = $("standReady").checked;
+  $("standReady").checked = false;
+  await post("/api/posture/stand", {posture, ready});
+};
+$("standCancel").onclick = () => post("/api/posture/cancel");
 $("reset").onclick = () => post("/api/reset");
 $("auto").onchange = (e) => post("/api/motion", { on: e.target.checked });
+$("mentorBackend").onchange = (e) => post("/api/mentor/backend", { key: e.target.value });
+for (const button of $("bodyButtons").children) {
+  button.setAttribute("aria-pressed", "false");
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    event.preventDefault();
+    beginBodyHold(button, {pointerId: event.pointerId});
+  });
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture", "pointerleave"])
+    button.addEventListener(name, (event) => {
+      if (activeBodyHold?.button === button && activeBodyHold.pointerId === event.pointerId)
+        finishBodyHold(activeBodyHold);
+    });
+  button.addEventListener("pointermove", (event) => {
+    if (activeBodyHold?.button !== button || activeBodyHold.pointerId !== event.pointerId) return;
+    const rect = button.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)
+      finishBodyHold(activeBodyHold);
+  });
+  button.addEventListener("keydown", (event) => {
+    if (!["Space", "Enter"].includes(event.code)) return;
+    event.preventDefault();
+    if (!event.repeat) beginBodyHold(button, {key: event.code});
+  });
+  button.addEventListener("keyup", (event) => {
+    if (activeBodyHold?.button === button && activeBodyHold.key === event.code) {
+      event.preventDefault(); finishBodyHold(activeBodyHold);
+    }
+  });
+  button.addEventListener("blur", () => { if (activeBodyHold?.button === button && activeBodyHold.key) finishBodyHold(); });
+  button.addEventListener("click", (event) => event.preventDefault());
+  button.addEventListener("contextmenu", (event) => event.preventDefault());
+  button.addEventListener("dragstart", (event) => event.preventDefault());
+}
+window.addEventListener("pointerup", (event) => {
+  if (activeBodyHold?.pointerId === event.pointerId) finishBodyHold();
+});
+window.addEventListener("keyup", (event) => {
+  if (activeBodyHold?.key === event.code) finishBodyHold();
+});
+window.addEventListener("blur", () => finishAllBodyHolds());
+document.addEventListener("visibilitychange", () => { if (document.hidden) finishAllBodyHolds(true); });
+window.addEventListener("pagehide", () => finishAllBodyHolds(true));
+$("bodyStop").onclick = () => { finishAllBodyHolds(); post("/api/body/stop"); };
+$("materialFile").onchange = async (e) => {
+  const file = e.target.files[0]; if (!file) return;
+  if (!/\.(txt|md)$/i.test(file.name)) return toast("テキスト・Markdownファイルを選んでください");
+  if (file.size > 32768) return toast("ファイルが大きすぎます。1件8,000文字以内にしてください");
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+    if (text.length > 8000) return toast("1件8,000文字以内にしてください");
+    $("materialName").value = file.name; $("materialText").value = text;
+  } catch (e) { toast("UTF-8のテキストファイルを選んでください"); }
+};
+$("materialAdd").onclick = async () => {
+  const name = $("materialName").value.trim(), text = $("materialText").value.trim();
+  if (!name || !text) return toast("資料名と本文を入力してください");
+  if (await post("/api/materials/add", { name, text })) {
+    $("materialName").value = ""; $("materialText").value = ""; $("materialFile").value = "";
+    $("materialEditor").open = false;
+  }
+};
 document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && document.activeElement !== $("text") && !e.repeat) { e.preventDefault(); toggleMic(); }
+  if (e.code === "Space" && !activeBodyHold && !["INPUT", "TEXTAREA", "BUTTON", "SUMMARY"].includes(document.activeElement.tagName) && !e.repeat && !state?.call?.active) {
+    e.preventDefault(); toggleMic();
+  }
 });
 refresh(); setInterval(refresh, 700);
 </script>

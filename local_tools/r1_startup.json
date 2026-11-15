@@ -1,0 +1,18 @@
+{
+  "model": "gpt-5-mini",
+  "volume": 100,
+  "gain_db": 12.0412,
+  "forward_speed": 0.3,
+  "forward_duration": 2,
+  "hold_linear_speed": 0.9,
+  "hold_yaw_speed": 1.8,
+  "call_threshold": 0.026,
+  "call_silence": 0.8,
+  "stt_model": "small",
+  "stt_device": "cuda",
+  "stt_compute_type": "float16",
+  "stt_language": "auto",
+  "voice": "Microsoft Ichiro",
+  "voice_en": "Microsoft David",
+  "strata_timeout": 10
+}

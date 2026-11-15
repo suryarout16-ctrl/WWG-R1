@@ -23,8 +23,10 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,8 +71,10 @@ GESTURES = {
     "fist_pump": (29, "ガッツポーズ（右）"),
     "hand_on_heart": (33, "右手を胸に当てる"),
     "emphasize": (35, "強調のしぐさ"),
+    "point_forward": (31, "前方を示す"),  # 既存プリセット。対象や指先の位置は自動調整しない。
+    "hat_tip": (None, "帽子をかぶる身ぶり（教示動作）"),
 }
-HOLD_IDS = {29, 33, 35}   # 終わったあと姿勢を保つ動作 → 話し終わったら 99 で腕を戻す
+HOLD_IDS = {29, 31, 33, 35}   # 終わったあと姿勢を保つ動作 → 話し終わったら 99 で腕を戻す
 STANDING_FSM = {811, 816}  # Running（816 は Arm Action 実行中に観測）
 
 
@@ -147,10 +151,10 @@ def clean_for_speech(text: str) -> str:
 SAPI_SCRIPT = r"""
 Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$s.SelectVoice($env:R1_TTS_VOICE)
+try { $s.SelectVoice($env:R1_TTS_VOICE) } catch { [Console]::Out.WriteLine("novoice " + $s.Voice.Name); [Console]::Out.Flush(); exit 3 }
 $s.Rate = [int]$env:R1_TTS_RATE
 $fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
-[Console]::Out.WriteLine("ready"); [Console]::Out.Flush()
+[Console]::Out.WriteLine("ready " + $s.Voice.Name); [Console]::Out.Flush()
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   try {
     $p = $line -split "`t"
@@ -167,13 +171,29 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 class SapiTTS:
     """Windows標準の日本語音声。オフラインで動く。男性は Microsoft Ichiro。"""
 
+    # Ichiro・David・Mark などの新しい音声（OneCore）は PowerShell 7 の System.Speech からしか選べない。
+    # Windows PowerShell 5.1 では選択に失敗し、既定の女性の声（Haruka）で黙って話してしまうため、
+    # pwsh を先に使い、どちらでも選べなければ起動を止める（別の声で話さない）。
+    SHELLS = ("pwsh", "powershell.exe")
+
     def __init__(self, voice: str, rate: int):
         env = dict(os.environ, R1_TTS_VOICE=voice, R1_TTS_RATE=str(rate))
-        self.proc = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", SAPI_SCRIPT],
-                                     env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     text=True, encoding="utf-8", errors="replace")
-        if self.proc.stdout.readline().strip() != "ready":
-            raise RuntimeError(f"Windows音声 '{voice}' を使えません: {self.proc.stderr.read()[:300]}")
+        self.proc, self.voice_name, tried = None, "", []
+        for shell in self.SHELLS:
+            exe = shutil.which(shell)
+            if not exe:
+                continue
+            proc = subprocess.Popen([exe, "-NoProfile", "-NonInteractive", "-Command", SAPI_SCRIPT],
+                                    env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, encoding="utf-8", errors="replace")
+            first = proc.stdout.readline().strip()
+            if first.startswith("ready"):
+                self.proc, self.voice_name = proc, first[len("ready"):].strip()
+                break
+            proc.kill()
+            tried.append(f"{shell}: {first or proc.stderr.read()[:200]}")
+        if self.proc is None:
+            raise RuntimeError(f"Windows音声 '{voice}' を選べません（{' / '.join(tried) or 'PowerShell が見つかりません'}）")
         self.tmp = Path(tempfile.mkdtemp(prefix="r1_tts_"))
 
     def synth(self, text: str) -> bytes:
@@ -235,104 +255,280 @@ class RobotSpeaker:
             sys.exit(f"R1 の音声サービスに届きません (SetVolume code={code})。02 の ping と sample-tts を先に確認してください")
         log(f"[R1] 接続OK  音量={volume}")
 
-    def play(self, pcm: bytes) -> None:
+    def play(self, pcm: bytes, *, should_continue=None) -> None:
+        if should_continue is not None and not should_continue():
+            return
         stream_id = uuid.uuid4().hex
+        sent = False
         try:
             for i in range(0, len(pcm), CHUNK_BYTES):
+                if should_continue is not None and not should_continue():
+                    return
+                sent = True   # RPC 例外でも、送信を試みたストリームは停止する。
                 code, _ = self.client.PlayStream(self.APP_NAME, stream_id, pcm[i:i + CHUNK_BYTES])
                 if code != 0:
                     raise RuntimeError(f"PlayStream 失敗 code={code}")
-            time.sleep(len(pcm) / (SAMPLE_RATE * 2) + 0.3)   # 送ったぶん鳴り終わるのを待つ
+            wait_s = len(pcm) / (SAMPLE_RATE * 2) + 0.3
+            if should_continue is None:
+                time.sleep(wait_s)
+            else:
+                deadline = time.monotonic() + wait_s
+                while should_continue():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.05, remaining))
         finally:
-            self.client.PlayStop(self.APP_NAME)
+            if sent or should_continue is None:
+                self.client.PlayStop(self.APP_NAME)
 
 
 class LocalSpeaker:
-    def play(self, pcm: bytes) -> None:
+    def play(self, pcm: bytes, *, should_continue=None) -> None:
+        if should_continue is not None and not should_continue():
+            return
         import sounddevice as sd
         sd.play(np.frombuffer(pcm, dtype="<i2"), SAMPLE_RATE)
-        sd.wait()
+        if should_continue is None:
+            sd.wait()
+            return
+        stream = sd.get_stream()
+        while stream.active:
+            if not should_continue():
+                sd.stop()
+                return
+            time.sleep(0.05)
 
 
 # ---------------------------------------------------------------- 腕の身ぶり (R1 Arm Action)
 class Gesturer:
-    """LLM が選んだ身ぶりを、話し始めと同時に送る。dry=True（--local）なら送らずに表示だけ。"""
+    """プリセット／登録済み教示動作を送る。lock は会話と手動操作の共用ロック。"""
 
-    def __init__(self, dry: bool):
+    FINISH_TIMEOUT = 12.0
+    MAX_CUSTOM_DURATION = 10.0
+
+    def __init__(self, dry: bool = False, hat_action: str = "hiyari_hat_v1", hat_fallback: bool = False):
         self.dry = dry
+        self.hat_action = hat_action
+        self.hat_fallback = hat_fallback
+        self.lock = threading.RLock()
         self.thread = None
         self.action_id = None
+        self.custom_name = None
+        self.custom_duration = 0.0
         self.result: dict = {}
         if dry:
-            log("[動作] --local のため身ぶりは送らず、選ばれた身ぶりを表示だけします")
+            self.describe = lambda code: "OK" if code == 0 else f"code={code}"
+            log(f"[動作] --local のため送信しません。帽子の教示動作: {hat_action}")
             return
         sys.path.insert(0, str(REPO_ROOT / "r1_motion"))
-        from arm_action import connect, describe   # ChannelFactoryInitialize の後で呼ぶこと
+        from arm_action import ACTIONS, connect, describe   # ChannelFactoryInitialize の後で呼ぶこと
         from stand import R1Loco
         self.describe = describe
-        self.arm = connect(12.0)
+        self.allowed_action_ids = set(ACTIONS)
+        self.arm = connect(self.FINISH_TIMEOUT)
         self.loco = R1Loco()
         self.loco.SetTimeout(3.0)
         self.loco.Init()
         log(f"[動作] 身ぶりを使います: {', '.join(f'{k}={v[1]}' for k, v in GESTURES.items())}")
 
-    def start(self, name: str) -> str:
-        if name not in GESTURES:
-            return "none"
-        action_id, label = GESTURES[name]
-        if self.dry:
-            log(f"  [動作] {label}（ID {action_id}、--local なので送らない）")
-            return "dry"
-        if self.thread and self.thread.is_alive():
-            log("  [動作] 前の身ぶりがまだ動いているので送らない")
-            return "busy"
+    def _ready(self) -> str | None:
         try:
             fsm = self.loco.get_fsm()
         except Exception as error:
+            self.result.update(code=7399, error=f"{type(error).__name__}: {error}")
             log(f"  [動作] モードを読めないので送らない: {error}")
             return "fsm_error"
         if fsm not in STANDING_FSM:
+            self.result.update(code=7404, fsm=fsm)
             log(f"  [動作] 立っていない（モード {fsm}）ので送らない")
             return f"skip_fsm_{fsm}"
-        self.action_id, self.result = action_id, {}
+        return None
 
-        def run():
-            code = self.arm.execute(action_id)   # 動作が終わるまで戻らない
-            if code == 7401:   # 前の動作（握手など）で腕が止まったまま → 戻してから送り直す
-                self.arm.release()
-                code = self.arm.execute(action_id)
-            self.result["code"] = code
-        self.thread = threading.Thread(target=run, daemon=True)
-        self.thread.start()
-        log(f"  [動作] {label}（ID {action_id}）")
-        return "sent"
-
-    def finish(self):
-        """話し終わったら呼ぶ。動作の終了を待ち、姿勢を保つ動作なら腕を戻す。"""
-        if self.dry or not self.thread:
-            return None
-        self.thread.join(timeout=12)
-        code = self.result.get("code")
-        if code != 0:
-            log(f"  [動作] 結果: {self.describe(code) if code is not None else '応答なし'}")
-        if code == 0 and self.action_id in HOLD_IDS:
+    def _preset(self, action_id: int) -> int:
+        code = self.arm.execute(action_id)
+        if code == 7401 and action_id != 99:
             release = self.arm.release()
             if release != 0:
-                log(f"  [動作] 腕を戻す(99): {self.describe(release)}")
-        self.thread = None
+                return release
+            code = self.arm.execute(action_id)
         return code
+
+    def start(self, name: str) -> str:
+        with self.lock:
+            # 完了済みでも finish が保持姿勢を解除するまでは次の命令を送らない。
+            if self.thread is not None:
+                log("  [動作] 前の身ぶりの終了処理がまだなので送らない")
+                return "busy"
+            if name not in GESTURES:
+                self.result = {"status": "none", "code": 3204}
+                return "none"
+            action_id, label = GESTURES[name]
+            self.result = {"gesture": name, "label": label}
+            self.action_id, self.custom_name, self.custom_duration = action_id, None, 0.0
+            if self.dry:
+                choice = f"教示名 {self.hat_action}" if name == "hat_tip" else f"ID {action_id}"
+                self.result.update(status="dry", code=0, action_name=self.hat_action if name == "hat_tip" else None)
+                log(f"  [動作] {label}（{choice}、--local なので送らない）")
+                return "dry"
+            status = self._ready()
+            if status:
+                self.result["status"] = status
+                return status
+            status = "sent"
+            if name == "hat_tip":
+                try:
+                    code, actions = self.arm.action_list()
+                except Exception as error:
+                    self.result.update(status="list_error", code=7399, error=f"{type(error).__name__}: {error}")
+                    log(f"  [動作] 教示一覧を読めないので送らない: {error}")
+                    return "list_error"
+                if code != 0 or not isinstance(actions, list) or len(actions) < 2 or not isinstance(actions[1], list):
+                    self.result.update(status="list_error", code=code if code else 7399)
+                    log("  [動作] 教示一覧が確認できないので帽子の動作は送らない")
+                    return "list_error"
+                entry = next((item for item in actions[1] if isinstance(item, dict) and item.get("name") == self.hat_action), None)
+                if entry is None:
+                    if not self.hat_fallback:
+                        self.result.update(status="unavailable_hat_action", code=7402, action_name=self.hat_action)
+                        log(f"  [動作] 教示動作 {self.hat_action} が未登録なので送らない（帽子の動作は未確認）")
+                        return "unavailable_hat_action"
+                    self.action_id = 26
+                    label = "頭の上で手を振る（帽子の身ぶりの代替）"
+                    self.result.update(label=label, fallback=True)
+                    status = "sent_fallback"
+                else:
+                    duration = entry.get("time")
+                    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration <= self.MAX_CUSTOM_DURATION:
+                        self.result.update(status="invalid_hat_duration", code=3204, action_name=self.hat_action)
+                        log(f"  [動作] 教示動作 {self.hat_action} の長さが未確認／上限 {self.MAX_CUSTOM_DURATION:g} 秒超なので送らない")
+                        return "invalid_hat_duration"
+                    self.custom_name, self.custom_duration = self.hat_action, float(duration)
+                    self.result.update(action_name=self.custom_name, duration=self.custom_duration)
+                    status = "sent_custom"
+            self.result.update(status=status, action_id=self.action_id)
+
+            def run():
+                try:
+                    code = self.arm.execute_custom(self.custom_name) if self.custom_name else self._preset(self.action_id)
+                    self.result["code"] = code
+                    # 7108 は非同期。登録時間が経過するまで同じ動作を占有する。
+                    if code == 0 and self.custom_name:
+                        time.sleep(self.custom_duration)
+                except Exception as error:
+                    self.result.update(code=7399, error=f"{type(error).__name__}: {error}")
+                    log(f"  [動作] 実行エラー: {error}")
+
+            self.thread = threading.Thread(target=run, name="r1-gesture", daemon=False)
+            self.thread.start()
+            choice = f"教示名 {self.custom_name}" if self.custom_name else f"ID {self.action_id}"
+            log(f"  [動作] {label}（{choice}）")
+            return status
+
+    def manual(self, action_id: int) -> int:
+        """手動プリセット。99 は終了済み動作の後処理も再試行できる。"""
+        with self.lock:
+            if isinstance(action_id, bool) or not isinstance(action_id, int):
+                return 3204
+            if self.thread is not None:
+                if action_id != 99 or self.thread.is_alive():
+                    return 7400
+                cleanup = self.finish()
+                if self.thread is not None:
+                    return cleanup if cleanup is not None else 7399
+                if cleanup == 0:
+                    # finish が保持姿勢／教示再生を既に解除したので重複送信しない。
+                    log("  [動作] 保留されていた動作の終了処理を完了しました")
+                    return 0
+                # 実行エラーを記録して終了済みなら、明示された 99 で復帰を試す。
+            if self.dry:
+                log(f"  [動作] 手動 ID {action_id}（--local なので送らない）")
+                return 0
+            if action_id not in self.allowed_action_ids:
+                return 7402
+            self.result = {"status": "manual", "action_id": action_id}
+            if action_id != 99 and self._ready():
+                return self.result.get("code", 7404)
+            try:
+                code = self._preset(action_id)
+                self.result["code"] = code
+                return code
+            except Exception as error:
+                self.result.update(code=7399, error=f"{type(error).__name__}: {error}")
+                log(f"  [動作] 手動操作エラー: {error}")
+                return 7399
+
+    def perform(self, name: str) -> int:
+        """手動の名前付き動作を開始から終了処理まで直列実行する。"""
+        with self.lock:
+            status = self.start(name)
+            if status == "busy":
+                return 7400
+            if status == "dry":
+                return 0
+            if not status.startswith("sent"):
+                return self.result.get("code", 7399)
+            return self.finish()
+
+    def finish(self):
+        """動作の終了まで待つ。タイムアウト中は参照を保持し、重複送信を防ぐ。"""
+        with self.lock:
+            if self.dry or not self.thread:
+                return None
+            self.thread.join(timeout=self.FINISH_TIMEOUT + self.custom_duration)
+            if self.thread.is_alive():
+                self.result["finish_status"] = "busy_timeout"
+                log("  [動作] 実行待ちが続いています。終了を確認するまで次の動作は送れません")
+                return 3104
+            code = self.result.get("code", 7399)
+            if code != 0:
+                log(f"  [動作] 結果: {self.describe(code)}")
+            if code == 0 and (self.custom_name or self.action_id in HOLD_IDS):
+                try:
+                    release = self.arm.stop_custom() if self.custom_name else self.arm.release()
+                except Exception as error:
+                    self.result.update(finish_status="release_error", error=f"{type(error).__name__}: {error}")
+                    log(f"  [動作] 腕を戻す操作でエラー: {error}")
+                    return 7399
+                self.result["release_code"] = release
+                if release != 0:
+                    self.result["finish_status"] = "release_error"
+                    log(f"  [動作] 腕を戻せません: {self.describe(release)}")
+                    return release
+            self.result["finish_status"] = "done"
+            self.thread = None
+            return code
 
 
 # ---------------------------------------------------------------- 音声認識 (faster-whisper)
+_KANA_KANJI = re.compile(r"[぀-ヿ㐀-鿿ｦ-ﾟ]")
+_LATIN = re.compile(r"[A-Za-z]")
+
+
+def text_language(text: str) -> str:
+    """文字から返答言語を決める。かな・漢字が 1 文字でもあれば日本語、ほぼ英字だけなら英語。
+
+    「A」「start」など英字が混ざる日本語は日本語のまま。判定できないときは日本語。
+    """
+    if not isinstance(text, str) or not text.strip():
+        return "ja"
+    if _KANA_KANJI.search(text):
+        return "ja"
+    letters = len(_LATIN.findall(text))
+    return "en" if letters >= 2 and letters >= 0.5 * len(re.sub(r"[\s\d\W_]", "", text) or "x") else "ja"
+
+
 class WhisperSTT:
-    def __init__(self, python: Path, model: str, device: str, compute_type: str, dll_dir: str = ""):
+    def __init__(self, python: Path, model: str, device: str, compute_type: str, dll_dir: str = "",
+                 language: str = "ja"):
         if not Path(python).exists():
             sys.exit(f"faster-whisper の Python が見つかりません: {python}  (--stt-python で指定)")
-        log(f"[STT] faster-whisper ({model}, {device}, {compute_type}) を読み込み中… 初回はモデルのダウンロードで時間がかかります")
+        self.language = language
+        log(f"[STT] faster-whisper ({model}, {device}, {compute_type}, 言語={language}) を読み込み中… 初回はモデルのダウンロードで時間がかかります")
         extra = ["--dll-dir", dll_dir] if dll_dir else []
         self.proc = subprocess.Popen(
             [str(python), str(HERE / "stt_worker.py"), "--model", model, "--device", device,
-             "--compute-type", compute_type, "--language", "ja", "--vad-filter", *extra],
+             "--compute-type", compute_type, "--language", language, "--vad-filter", *extra],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8",
             env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         ready = self._read()
@@ -346,14 +542,20 @@ class WhisperSTT:
             raise RuntimeError("STT ワーカーが終了しました（上のエラーを確認してください）")
         return json.loads(line)
 
-    def transcribe(self, wav_path: str) -> str:
+    def transcribe_detail(self, wav_path: str) -> dict:
+        """{"text", "language", "language_prob", "confidence", "avg_logprob"} を返す。"""
         rid = uuid.uuid4().hex
-        self.proc.stdin.write(json.dumps({"id": rid, "audioPath": wav_path}) + "\n")
+        self.proc.stdin.write(json.dumps({"id": rid, "audioPath": str(wav_path)}) + "\n")
         self.proc.stdin.flush()
         msg = self._read()
         if msg.get("type") == "error":
             raise RuntimeError(f"音声認識エラー: {msg.get('message')}")
-        return msg.get("text", "")
+        return {"text": msg.get("text", ""), "language": msg.get("language") or self.language.split(",")[0],
+                "language_prob": msg.get("language_prob"), "confidence": msg.get("confidence"),
+                "avg_logprob": msg.get("avg_logprob"), "retried_as": msg.get("retried_as")}
+
+    def transcribe(self, wav_path: str) -> str:
+        return self.transcribe_detail(wav_path)["text"]
 
     def close(self) -> None:
         if self.proc.poll() is None:
@@ -504,7 +706,7 @@ def run(args) -> None:
         try:
             speaker.play(pcm)
         finally:
-            if status == "sent":
+            if status and status.startswith("sent"):
                 code = gesturer.finish()
                 if record is not None:
                     record["gesture_code"] = code

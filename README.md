@@ -1,126 +1,267 @@
-# WWG-R1：Unitree R1 日本語チャットボット
+# WWG-R1：新人研修を手伝う熟練工R1
 
-Unitree R1 を、日本語で会話する受付・案内ロボットにする。
-プログラムはすべて手元の PC で動かし、LAN（DDS）経由で R1 に命令を送る。R1 の Onboard PC には触らない。
+Unitree R1 と、気さくで面倒見の良い「研修担当R1（Strata）」を使った日本語会話デモ。
+PC のマイクで話し、R1 が短い返事と身ぶりで応える。台本・作業指示書をパネルから読み込み、研修の参考資料として使える。
+プログラムは手元の PC で動かし、R1 とは LAN（DDS）で通信する。R1 の Onboard PC にはログインしない。
 
-**当日の運用は [docs/DEMO_RUNBOOK.md](docs/DEMO_RUNBOOK.md)（デモ運用手順書）を見る。**
+当日の操作は [デモ運用手順書](docs/DEMO_RUNBOOK.md)、台本を受け取ってからの準備は [新人研修デモの組み立て方](docs/TRAINING_DEMO.md) を参照。
 
-## 技術的アプローチ
+## 今回と同じ設定で実機パネルを起動する（Windows）
 
-```
-PCマイク ──▶ faster-whisper (small / ja / VAD) ──▶ OpenAI API (Responses) ──▶ Windows SAPI「Microsoft Ichiro」(男性)
-                                                                                 │ 16kHz mono PCM
-                                                                                 ▼
-                                                     unitree_sdk2py AudioClient.PlayStream ──DDS──▶ R1 頭部スピーカー
-```
-
-1. **音声入力**：PC マイクで録音し、faster-whisper（small、GPU が使えなければ CPU int8 に自動切替）で文字にする
-2. **対話生成**：OpenAI Responses API。会話履歴を保持し、読み上げ向けに 1〜2 文の短い返答にする
-3. **音声合成**：R1 標準の TtsMaker は英語・中国語のみなので、日本語は PC 側で合成する（Windows 標準の男性音声 Ichiro、オフライン）
-4. **再生**：AudioClient.PlayStream で 1 秒ずつ PCM を送り、R1 のスピーカーから流す（R1 専用の音声クライアントは SDK に無いので G1 用を使う）
-5. **安全・安定性**：体は動かさない（音声のみ）。通信断時は定型文で応答して止まらない。`--say` → `--echo` → 本番の順で段階的に確認する
-
-## 使用リポジトリ・SDK
-
-| 名前 | 用途 |
-|---|---|
-| [unitreerobotics/unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python) | R1 との通信、音声再生（AudioClient） |
-| CycloneDDS 0.10.2 | PC と R1 の DDS 通信（R1 側と同じ版。11.x では通信できない） |
-| [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper) | 日本語音声認識 |
-| OpenAI Python SDK | 対話生成 |
-| Windows System.Speech（Microsoft Ichiro） | 日本語音声合成 |
-| sounddevice / NumPy / SciPy | マイク入力、音声変換 |
-| 参考：[GAI-313/humanoid_hackathon_env](https://github.com/GAI-313/humanoid_hackathon_env)、[syswonder/robot-unitree-r1](https://github.com/syswonder/robot-unitree-r1) | ハッカソン環境、R1 音声インターフェースの実装例 |
-
-## セットアップ
-
-1. Git と [pixi](https://pixi.prefix.dev/latest/installation/) を入れる
-2. `git clone https://github.com/suryarout16-ctrl/WWG-R1.git` → `cd WWG-R1` → `pixi install`
-3. `pixi run verify-sdk` で `unitree_sdk2py & cyclonedds loaded successfully!` が出れば OK
-4. OpenAI の API キーを、このPCの中だけに保存する（リポジトリやチャットには書かない）
-   Windows: `pixi run python r1_chat/credentials.py set`（資格情報マネージャーに暗号化保存。`status` で確認）
-   その他の OS: 環境変数 `OPENAI_API_KEY`
-   PowerShell: `[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "<キー>", "User")` → 開き直す
-5. （任意・Windows で GPU 認識）cuBLAS 12 / cuDNN 9 の DLL があるフォルダを `R1_CUDA_DLL_DIR` に入れる。無ければ CPU で動く
-6. Windows は有線 LAN アダプタ名を英数字（例 `Ethernet`）に変えておく
-
-## R1 との接続
-
-LAN ケーブルで R1 のうなじのポートと PC をつないだら、1 本のスクリプトで設定〜確認まで行う（Windows、管理者権限は自動で求められる）:
+このPCでは、R1とLANをつなぎ、リポジトリのルートから次のコマンド1回で接続確認から8770パネルのブラウザ表示まで進められる。
 
 ```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\local_tools\start_r1.ps1
+```
+
+| 項目 | 保存した設定 |
+|---|---|
+| パネル・実機接続 | 8770、Ethernet、DDS送信元192.168.123.164、R1 192.168.123.161 |
+| 応答先・人格 | GPT API / gpt-5-mini、研修担当R1に固定、自動身ぶりオン |
+| 音声出力 | 本体100、送信前+12.0412 dB（元の約4倍、小さい波形の増幅。ソフトリミッターあり） |
+| 押下中の移動指令 | 前後左右0.9 m/s、旋回1.8 rad/s |
+| 会話からの前進 | 0.3 m/s・2秒 |
+| 入力・認識 | Nothing Ear (3a)の同一機器WASAPI、small/CUDA/float16、日英auto |
+| 通話の発話判定 | 0.026、無音0.8秒で区切る |
+| 研修資料 | logs/training/live_materials.json |
+
+数値は [起動設定](local_tools/r1_startup.json) にまとめて保存する。Z840とCUDAのPC固有設定は、Git対象外の `local_tools/r1_local_settings.ps1` を使う。
+
+LANは最大120秒待つ。接続後、必要な場合だけ指定EthernetのR1用IPとPrivate設定を確認・補正する。管理者確認が表示された場合はWindowsで許可する。既存の別IP・DNS・経路を削除せず、DHCP有効時にIP追加が必要な場合などは停止する。実機パネルの準備完了後にブラウザを開く。LAN未接続時にローカルモードや仮想R1へは切り替えない。
+
+起動済みで同じ設定ならパネルを開くだけ。設定が古い場合は待機中だけ更新して起動し直し、通話・研修・動作中は停止して案内する。起動時に歩行・起立・通話を自動開始せず、通話はパネルの「通話開始」から行う。
+
+`-Backend strata` でStrata、`-Restart` で待機中の再起動、`-Stop` で待機中の終了、`-DryRun` でLAN未接続でも起動設定だけを確認できる。
+
+R1を接続せずマイクとチャットを試す場合は、同じコマンドへ `-Offline` を付ける。8770でPC音声のローカル試験を起動し、LAN設定やDDS、仮想器を使わない。モデル・教材・マイク・音声設定は同じ起動設定を使う。実機接続後は通話・研修を終了し、動作プレビューが終わってから、`-Offline` を外した元のコマンドを実行する。待機中のローカルパネルを終了し、実機パネルへ切り替える。
+
+## まずパネルを開く
+
+Git と [pixi](https://pixi.prefix.dev/latest/installation/) を入れ、リポジトリのルートで実行する。
+
+```powershell
+pixi install
+pixi run verify-sdk
+```
+
+Z840 への SSH 接続情報は、この PC の環境変数で渡す。実際の接続先・ユーザー名・鍵の内容をリポジトリに書かない。
+
+```powershell
+$env:R1_Z840_HOST = "<Z840のSSH接続先>"
+$env:R1_Z840_USER = "<SSHユーザー名>"
+$env:R1_Z840_KEY_DIR = "<id_ed25519とknown_hostsのあるフォルダ>"
+$env:R1_Z840_HOSTKEY_ALIAS = "<known_hostsの登録名>"
+pixi run ui --local
+```
+
+ブラウザで [操作パネル](http://localhost:8765) を開く。`--local` は R1 を使わず PC のスピーカーで試す指定で、R1 がないときに必要。
+文字だけを先に確認する場合は `pixi run ui --local --no-stt`。この指定では通話を開始できない。
+
+R1 を接続して実機で使う場合は、運用手順に従って LAN とモードを確認し、次で起動する。
+
+```powershell
+pixi run ui -i Ethernet --volume 100 --gain 9
+```
+
+パネルの既定は **研修担当R1に固定、自動身ぶりオン**。音声だけの実機確認には `--no-motion` を付ける。
+人格を切り替える必要がある場合だけ `--allow-persona-switch` を付ける。旧指定 `--persona omoshiro` は `mentor` の別名として扱う。
+
+## 会話・人格・教材
+
+「通話を開始」を押すと、この PC のマイクで発話を検知し、既定で約 0.8 秒の無音を話し終わりとして自動送信する。
+R1 の返事を準備・再生している間は新しい録音を取り込まず、返事が終わると再び聞く。発話への割り込みには対応しない。
+「通話を終了」は録音を終了し、その通話で処理中だった返事の後続の再生を抑止する。ロボットの緊急停止はコントローラーで行う。
+一回ずつの録音、文字入力、「そのまま話させる」も使える。
+
+研修担当R1は、一人称が「俺」の、質問しやすい熟練工のおじさんというキャラクター。失敗を責めず、危険が続く場面では冗談と身ぶりを控える。
+人格の根底は `r1_chat/identity.py` の変更不能な自己像と、`r1_chat/personas.py` から毎回渡す固定指示で維持する。会話リセットや教材の変更では変わらない。
+**LoRA の追加学習は実施していない。Strata のモデルや Erika の人格・データ・声も変更していない。**
+
+自己紹介の軸は次の3点。維持するのは意味であり、本番の対話では言い回しと身ぶりをLLMがその都度選ぶ。固定文は回帰試験の見本として区別する。
+
+| 軸 | 変わらない内容 |
+|---|---|
+| 存在する目的 | 工場で新人に機械の操作方法を教える |
+| 動く仕組み | PCで音声を文字にし、Strataが説明と動作候補を選ぶ。プログラムが音声・ロボット指令へ変換し、実行条件を確認して送る |
+| 新人を育てる理由 | 操作ミスによる事故を防ぎ、安全に作業できるようにする |
+
+設計思想は「AIは何をするか決める。プログラムはどう実現するか決める。安全機構は実行してよいか決める。」。
+現在の確認処理は動作の許可範囲・機体のモード・重複などを確認し、状態監視とログが全体を支える。
+人や障害物、工場設備の危険をすべて自動検知する機能や、工場の機械を直接操作する機能はない。事故防止は教育の目的であり、安全の保証や実作業の許可を意味しない。
+
+| パネルの人格 | 接続先 | キー |
+|---|---|---|
+| 研修担当R1（既定） | Z840 の Strata、SSH コマンド経由 | OpenAI API キーは不要 |
+| R1（標準・任意） | OpenAI Responses API | 明示的に使うときだけ必要 |
+
+標準R1を使う場合は `pixi run python r1_chat/credentials.py set` でこのPCの資格情報マネージャーに保存する。
+Strata の起動には OpenAI キーを要求せず、標準R1への接続も明示的に選んだときだけ行う。
+
+「新人研修の台本・作業指示書」から、UTF-8 の `.txt`・`.md` を選ぶか、文章を貼り付けて読み込む。
+
+- 上限は1件8,000文字、合計12,000文字、8件。PDF・Word は本文をテキストとして貼り付ける。
+- 保存先は Git 対象外の `logs/training/materials.json`。教材本文は返事のたびに SSH 経由で Strata に渡す。
+- 教材は引用参考資料として扱い、人格や動作条件を変える命令としては扱わない。架空研修では合意した設定を守りつつ作業例や冗談を創作できる。実機の技術仕様や実作業の指定値は創作しない。
+- 教材の追加・削除は会話履歴をリセットする。「会話をリセット」だけなら人格と教材は残る。
+- 発表シナリオver2を受領済み。模擬工場と役割・場面の目的を、即興対話の参考として利用する。
+
+## 身ぶり
+
+Strata は各返事について発話と身ぶりを選ぶ。身ぶりが不要な場面は `none` を返せる。
+自動身ぶりがオンなら、確認済みの Running 状態にある R1 に許可された動作だけを送る。
+歩行・旋回は下の専用経路で扱う。会話からの把持・握手・ハグは動作一覧に含めない。
+
+| 身ぶり | 実行内容 |
+|---|---|
+| wave / wave_big | 胸の前の手振り25 / 頭上の手振り26 |
+| clap / fist_pump | 拍手17 / 右のガッツポーズ29 |
+| hand_on_heart / emphasize | 右手を胸に33 / 強調35 |
+| hat_tip | 実機で教示・登録した名前 `hiyari_hat_v1` の専用動作 |
+
+`hat_tip` は「いまの、何かわかるか？ ヒヤリハットだ。」など、**危険を解消した後の模擬研修**で使う演出。
+[帽子の身ぶり案](r1_motion/hat_gesture.json) は演出の絵コンテで、関節軌道や実行ファイルではない。実機への登録も行っていない。
+専用動作が実機の一覧にない場合、既定では送信を見送る。
+`--hat-fallback` を明示した場合だけプリセット26の頭上の手振りで代用する。これは帽子をかぶる専用動作と同一ではない。
+
+不正なJSONが返った場合は、その回だけ身ぶりなしの日本語文章を1回だけ取り直す。読み上げ可能な文章を得られなければエラーにし、JSONをそのまま話させない。
+
+## LLMによる即興対話
+
+本番の中心は、利用者の発言にLLMが返答と動作候補を生成する対話とする。同じ研修担当R1が、話題に応じて次を使い分ける。
+
+| 話題 | 返答の方針 |
+|---|---|
+| 架空作業の質疑応答 | 合意済みの模擬ボタンなどの設定と会話の整合を保ち、作業例・理由・ユーモアを自由に膨らませる |
+| R1内部の技術的な質問 | 実コードに基づく事実を使い、根拠のない仕様や実装は作らない。不明・未確認はそう答える |
+| 自分の存在意義 | 新人に機械操作を教えて事故を防ぐという目的、仕組み、育てる理由を意味として保ち、自然な表現で答える |
+
+どの話題でも、LLMが発話と身ぶりを一緒に選ぶ。プログラムは動作の許可範囲・状態・重複・時間制限を確認する。架空作業の創作は、実際のロボットの能力や実行結果を作ってよいという意味ではない。
+自由な質問の応答先は `--mentor-backend strata|openai` またはパネルで選び、同じ人格・教材・履歴を引き継ぐ。
+場面の設定と進め方は [即興デモ](docs/LIVE_DEMO.md) を参照。
+
+### 固定シナリオの回帰試験
+
+`scenarios/presentation_v2.json` は、本番の返答を決めるセリフ帳ではなく、発話と動作の連携を再現するための回帰試験用データとして残す。本編24段と任意の補足7段。
+
+```powershell
+pixi run python scripts/virtual_scenario.py scenarios/presentation_v2.json --end-step s4_presenter --run-virtual --pc-audio --interactive
+pixi run python scripts/virtual_scenario.py scenarios/presentation_v2.json --start-step s5_time_cue --run-virtual --pc-audio --interactive
+```
+
+仮想器の起動、場面と動作、所要時間、GPT APIへの手動切替は [発表の進め方](docs/PRESENTATION_V2_RUNBOOK.md) を参照。
+この回帰試験だけはLLMを呼ばず、同じ台詞と動作を再生する。本番の即興対話とは別経路である。
+帽子の専用動作は未実装として送信しない。前方を示す31は精密なボタン追従ではなく、決めた配置へ腕を伸ばす演出である。
+
+## 仮想R1で発話と動作を組む
+
+現在は実機試験を終了し、Claude作成の仮想R1と組み合わせて研修の演出を検討する。
+最初の仮台本は `scenarios/training_rehearsal.json`。正式な台本や作業指示書を受け取る前の構成案で、具体的な機械操作の手順は含めない。
+
+```powershell
+# 通信・音声再生を行わず、場面と動作の順序を表示
+pixi run python scripts/virtual_scenario.py scenarios/training_rehearsal.json
+# 起動済みの仮想R1へ、PC内のループバックだけで実行
+pixi run python scripts/virtual_scenario.py scenarios/training_rehearsal.json --run-virtual
+```
+
+PCからR1役の台詞も聞く場合は `--pc-audio` を追加する。新人役・進行役の文章は表示用。
+発話とその場面の動作を重ね、動作の完了・保持解除を待ってから次へ進む。前進の終了時にはゼロ速度を送る。
+帽子の専用動作は未実装として表示し、送信しない。詳しくは [仮台本の使い方](docs/VIRTUAL_SCENARIOS.md) と [仮想器との互換性](docs/VIRTUAL_R1_COMPATIBILITY.md) を参照。
+仮想器でのリハーサルを、実機の歩行・衝突・関節軌道の検証として扱わない。
+
+## 歩行・旋回と関節制御
+
+歩行は会話動作シナリオの必須機能として開発する。開発上は全身駆動と関節制御が許可されているが、**新しい関節動作の実機送信は現在保留中**。
+既存の腕プリセットと、短時間の歩行・旋回を分けて確認する。
+
+パネルの歩行は `--local` では送信しないプレビュー、実機では `--body-control` を付けた場合だけ有効になる。
+
+```powershell
+pixi run ui --local
+pixi run ui -i Ethernet --body-control --velocity-127-compatible --forward-speed 0.3 --forward-duration 2 --volume 100 --gain 9
+```
+
+前進・後退・左右横移動・左右旋回・停止の指令に対応。特に指定しない場合は1回1秒、並進0.1m/s、旋回0.2rad/s。
+上の実機用コマンドは、目視確認できた前進だけを0.3m/s・2秒に設定する。会話とボタンは同じ設定を使い、後退・横移動・旋回の設定は変えない。
+`--forward-speed` は0より大きく0.3m/s以下、`--forward-duration` は0より大きく2秒以下。機体・周囲の条件に合わせて確認し、指令値から正確な移動距離を保証しない。
+実機の新しい移動指令は Running（811）を読み取れた場合だけ送り、終了時には速度ゼロを送る。起立やFSM変更を自動で行う機能ではない。
+この実機では移動・ゼロ速度ともに応答127が返るため、上の起動例で `--velocity-127-compatible` を明示している。互換扱いは速度指令7105に限り、元の応答値をログに残す。別の機体やAPIへ一律に適用しない。
+実機の歩行を有効にすると、脚の状態を10Hzで読み、CRC・0.5秒未満の鮮度・確認済みの機体情報・モーター異常の有無を確認する。高頻度のDDSコールバックではなく、最新1件を読むポーリングを使う。
+状態を確認できなければ移動を始めず、動作中に状態が不正になった場合はゼロ速度を送る。ゼロ指令後は最長2秒間、異なる新しい観測で0.5秒以上の脚の静止を確認し、確認できなければ次の移動を止める。
+脚の動作・静止の観測は、機体が指定方向へ移動したことや床面上で停止したことの保証ではない。応答127と観測結果を分けて表示・記録し、実際の動きはオペレーターも確認する。
+利用者が明示的に歩行・旋回を頼んだ場合だけ、Strataが選んだ該当動作を実行候補にする。あいさつや説明だけでLLMが移動を選んでも送らない。
+ロボットの周囲の空間と停止担当者は人が確認する。速度と時間による指令なので、正確な距離・角度や障害物がないことは保証しない。
+パネルの歩行停止は速度ゼロの指令であり、コントローラーの緊急停止の代わりではない。
+
+提示されたG1用の `sample-walk` はR1でそのまま実行しない。サンプルの速度・3秒間の動作を流用せず、R1で確認したsport API7105の形式と、上記の低速・短時間の経路を使う。
+
+`r1_motion/joint_control.py` は、確認済みの機体プロファイルと測定状態を入力して、関節限界・速度・初期角の連続性などを検査するオフラインの軌道プレビュー。
+100Hzの結果を出すが、SDKやDDSによる実機送信機能はなく、出力は必ず `executable: false`。
+機体固有の関節限界を推測で埋めたり、このプレビューを低レベル制御へ直接送ったりしない。
+
+## 構成と接続
+
+```text
+PCマイク → faster-whisper → SSHコマンド中継 → Z840 Strata
+                                               ↓ 発話・身ぶり
+Windows Ichiro → 16kHz mono PCM → DDS → R1スピーカー
+身ぶりの検証 → R1 armサービス
+```
+
+標準の `TtsMaker` は中国語（話者ID 0）・英語（ID 1）用で、日本語発話には使わない。日本語はWindowsのIchiroで合成し、PCM音声を `PlayStream` でR1へ送る。
+
+Z840 では既存の Strata を利用する。SSH のポート転送は使わず、`r1_chat/ssh_relay.py` が標準入出力で依頼を渡す中継を呼ぶ。
+Z840 の設定・モデルの入れ替えは行わない。Erika と同じ推論サーバーを共有するため、同時利用時は待ち時間が延びる場合がある。
+HTTPで直接届く互換サーバーを使う構成では `R1_STRATA_URL` / `--strata-url` を設定する。
+
+R1へのLAN設定は、接続する有線アダプタと元の設定を確認したうえで実行する。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1 -DryRun
 powershell -ExecutionPolicy Bypass -File scripts\setup_lan.ps1
 ```
 
-1. 有線 LAN アダプタを探し、名前を `Ethernet` に変える
-2. 固定 IP `192.168.123.164/24`（ゲートウェイなし。ほかの IPv4 は外し、元の設定は `.lan_backup.json` に保存）
-3. ネットワークを「プライベート」に（「パブリック」だと 3102 エラーの原因になる）
-4. `192.168.123.161` に ping
-5. R1 に日本語で一言話させる（`pixi run chat -i Ethernet --say ...`）
+このスクリプトはアダプタ名・固定IP・ネットワーク種別を変更し、ping と日本語発話を試す。設定は `.lan_backup.json` に保存する。
+復元は同スクリプトの `-Restore`。IPなどは参加環境の指定を優先する。
 
-- `-DryRun` で何も変えずにやることだけ表示、`-Restore` で元に戻す
-- 実行内容と最後のアダプタ状態は `logs\setup_lan_*.log` に残る
+音声認識をGPUで動かす場合は、cuBLAS 12 / cuDNN 9 の DLL があるフォルダを `R1_CUDA_DLL_DIR` に設定する。GPUが使えなければCPU int8に切り替える。
 
-## 使い方（リポジトリのルートで）
+## 従来のCLI・確認用コマンド
 
-| やりたいこと | コマンド |
+`pixi run chat` は従来の標準R1 / OpenAIのCLI。パネルとは既定が異なり、CLIの身ぶりは `--motion` を付けた場合だけ有効。
+
+| 用途 | コマンド |
 |---|---|
-| R1 に一言話させる（LLM 不要） | `pixi run chat -i Ethernet --say "こんにちは、僕はR1です"` |
-| マイク→認識→声 の確認（おうむ返し、LLM 不要） | `pixi run chat -i Ethernet --echo` |
-| 本番（声で会話） | `pixi run chat -i Ethernet` |
-| 本番＋身ぶり（LLM が手を振る・拍手などを選ぶ） | `pixi run chat -i Ethernet --motion` |
-| 身ぶりの選ばれ方だけ確認（R1 なし） | `pixi run chat --local --text --motion` |
-| あいさつデモ（脱力→起立→手振り・あいさつ→握手） | `pixi run python r1_motion/greet.py -i Ethernet --posture l` |
-| 腕のプリセット動作の一覧 / 実行 | `pixi run python r1_motion/arm_action.py -i Ethernet --list` / `--id 25` |
-| R1 なしで PC のスピーカーで試す | `pixi run chat --local` |
-| マイクなし（キーボード） | `pixi run chat --local --text` |
+| R1に一言話させる、LLM不要 | `pixi run chat -i Ethernet --say "接続テストです"` |
+| マイク認識と音声再生、LLM不要 | `pixi run chat -i Ethernet --echo` |
+| 標準R1の会話 | `pixi run chat -i Ethernet` |
+| R1なしの文字入力CLI | `pixi run chat --local --text` |
+| R1の状態を読む | `pixi run python r1_motion/stand.py -i Ethernet --status` |
+| 実機の腕動作一覧を読む | `pixi run python r1_motion/arm_action.py -i Ethernet --list` |
+| 腕を戻す | `pixi run python r1_motion/arm_action.py -i Ethernet --id 99` |
 
-会話中：文字を打って Enter → 送信 / 何も打たずに Enter → 録音開始、もう一度 Enter で停止 / `q` で終了
+CLIでは文字入力とEnterで送信、空のEnterで録音開始・次のEnterで停止、`q`で終了する。
+`logs/` に画面ログと1往復ごとのJSONLを残す。会話内容を含むため共有前に内容を確認する。
 
-### ログ
+## 機能の範囲と確認状況
 
-`logs/` に実行ごとに残る（Git には含めない）:
-- `r1_chat_<日時>_<chat|echo|say>.log`：画面と同じ内容（時刻付き、エラーの詳細も）
-- `r1_chat_<日時>_<モード>_turns.jsonl`：1 往復ごとの記録（入力、認識結果、返答、認識・LLM・合成の秒数、エラー）
-- `--save-audio` で録音した声も `logs/audio/` に WAV で残す。`--no-log` でログなし
+固定人格、教材参照、自動ターンの通話、帽子の専用動作を選ぶ仕組みを実装している。
+これらについてはソフトウェアテストと、実際のStrataでの研修担当の返答・帽子の身ぶり選択・教材参照を確認した。
+2026-11-14に、脱力からRunningへの自立起動、固定の自己紹介と手振りを実機で確認した。
+会話前進0.1m/s・1秒、左横移動0.1m/s・1秒、左旋回0.2rad/s・1秒では、脚の小さな変化は観測できても、目視結果は「発話したが移動なし」だった。前進0.2m/s・2秒でも実移動は確認できなかった。
+その後、**前進0.3m/s・2秒とゼロ速度の試験で、ユーザーが前進・停止を目視確認した**。応答は移動・ゼロとも127。これはこの機体・その条件での確認で、最低速度や正確な距離、あらゆる条件での停止保証ではない。小さな関節値の変化だけを歩行成功と扱わない。
+前進専用の速度・時間設定を会話・ボタンの両経路へ実装し、偽クライアントで送信内容と終了時のゼロを検証した。実機での連動再試験は時間切れで行わず、仮想リハーサルへ移行した。後退・横移動・旋回の床上での移動は未確認。
+**新しい通話の実マイクでの検証、実機スピーカーの連続会話、帽子の動作登録・再生は未確認。**
+以前の引継記録には Ichiro 合成・Whisper・PCマイク・ローカル会話と、Strataを使った会話・記憶・身ぶり選択の確認がある。
+それらは今回の自動通話や実機動作の合格を意味しない。
 
-主なオプション：`--volume 70`（R1 の音量、上限 100）、`--gain 9`（さらに音圧を上げる dB）、`--rate 2`（Ichiro の速さ -10〜10）、`--model gpt-5-mini`（または環境変数 `OPENAI_MODEL`）、
-`--tts openai --voice onyx`、`--mic-device <番号>`、`--stt-device cpu --stt-compute-type int8`
+新しい関節動作は保留中で、脚を含む直接の関節指令を送る機能は実装していない。正確な距離移動、把持、カメラ連携、自律移動もこのパネルには実装していない。
+映像・深度による地図作成は別構成の研究例があるが、今のWWG-R1で検証済みの機能ではない。
+G1のサンプルをR1へそのまま送らず、機種・関節構成・メッセージ形式・ファームウェアを確認してから個別に組み立てる。
 
-### 身ぶり（`--motion`）
+## 使用リポジトリと運用ルール
 
-- LLM は返事を `{"say": 文, "gesture": 身ぶり}` の JSON（Structured Outputs）で返し、話し始めと同時に R1 の Arm Action（`arm` サービス、API 7106）を送る
-- 会話から呼べるのは 6 種類だけ：wave(25 胸の前で手を振る) / wave_big(26 頭の上) / clap(17 拍手) / fist_pump(29 ガッツポーズ) / hand_on_heart(33 右手を胸に) / emphasize(35 強調)。握手・ハグなど人に触れる動作は入れない
-- R1 が Running（811）のときだけ送る。姿勢を保つ動作は話し終わったら 99 で腕を戻す。ログの `gesture` / `gesture_status` / `gesture_code` に記録
-- 手振り・握手は `sport` ではなく `arm` サービス（`sport` の 7106 はこの R1 では 3203 = 未実装）
-
-### 操作パネルと人格（`pixi run ui`）
-
-ブラウザで http://127.0.0.1:8765 を開いて操作する（文字・マイク・身ぶりボタン・人格の切り替え・ログ）。
-
-| 人格 | LLM | 料金 |
-|---|---|---|
-| R1（標準） | OpenAI（gpt-5-mini） | API 料金あり |
-| おもしろR1 | Z840 の Strata（Qwen3.8-Flash-Next IQ3_XXS、思考なし、1 往復 約 1〜1.5 秒） | なし（ローカル） |
-
-おもしろR1 は Erika とは別の人格（`r1_chat/personas.py` で編集）。Z840 の Strata は Z840 の中（127.0.0.1:8081）だけで開いていて
-SSH のポート転送も禁止なので、SSH のコマンド実行で Z840 上の中継を呼ぶ（`r1_chat/ssh_relay.py`、Z840 の設定は変えない）。
-
-```powershell
-$env:R1_Z840_HOST = "<Z840 の Tailscale IP>"; $env:R1_Z840_USER = "<ユーザー名>"
-$env:R1_Z840_KEY_DIR = "<id_ed25519 と known_hosts のフォルダ>"; $env:R1_Z840_HOSTKEY_ALIAS = "<known_hosts の名前>"
-pixi run ui -i Ethernet --volume 100 --gain 9 --motion
-```
-
-## 安全ルール（ハッカソン運用ガイドより）
-
-- Onboard PC にログインしない。プログラムは PC から
-- 初めて動かすプログラムは R1 を吊った状態で。床では周囲 2 m 以上空ける
-- 動作コマンドを送るときは、コントローラー（E-Stop）を持つオペレーターを別に置く
-- 日本語の音声を流すことは事前にスタッフに相談する
-
-## 確認状況（2026-11-14）
-
-- 確認済み：Ichiro 合成（2 回目以降 0.1〜0.7 秒）、faster-whisper small（GPU 約 1.2 秒 / CPU 約 2.2 秒）、PC マイク録音、`--local --text --echo` の会話ループ
-- 未確認：OpenAI 応答、R1 実機での PlayStream 再生
-- できないこと：脚の直接制御、SLAM（LiDAR なし）、正確な距離移動、把持。詳細は [docs/R1_guide.md](docs/R1_guide.md)
+- [Unitree SDK2 Python](https://github.com/unitreerobotics/unitree_sdk2_python)、CycloneDDS 0.10.2、faster-whisper、Windows System.Speech、sounddevice / NumPy / SciPyを使用。
+- 参考：[公式R1腕制御](https://support.unitree.com/home/en/R1_developer/arm_control_routine)、[公式R1映像](https://support.unitree.com/home/en/R1_developer/video_service)、[syswonder R1 EDU](https://github.com/syswonder/robot-unitree-r1)。syswonderの全構成はオンボード向けで、このPCの構成へそのまま導入しない。
+- 初めて動かすコードはR1を吊って確認し、床では周囲2m以上を空ける。動作時はE-Stopを持つ別のオペレーターを置く。
+- 日本語音声や動作の実行は運営スタッフと確認する。緊急停止はコントローラーで行う。

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "mode": "virtual_only",
+  "id": "mentor_first_rehearsal",
+  "title": "研修担当R1：発話と動作の仮リハーサル",
+  "notes": "動作と発話の順序を組むための仮案。正式な台本・作業指示書は未提供。機械の具体的な操作手順や指定値は含めない。仮想器での成功は実機の動作確認を意味しない。",
+  "steps": [
+    {
+      "id": "introduction",
+      "title": "目的・仕組み・新人を育てる理由",
+      "role": "r1",
+      "say_ref": "self_introduction",
+      "action": "wave",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "check_document",
+      "title": "指示書の確認へつなぐ",
+      "role": "r1",
+      "say": "まずは作業指示書を一緒に確認しよう。手順だけでなく、その理由も確かめるぞ。",
+      "action": "emphasize",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "approach",
+      "title": "前進と発話を重ね、終了時にゼロ速度",
+      "role": "r1",
+      "say": "説明する位置へ、少し前に出る動きだ。ここで発話とのタイミングを確かめよう。",
+      "action": "move_forward",
+      "duration_s": 2.0,
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "settle",
+      "title": "停止を独立した区切りにする",
+      "role": "r1",
+      "say": "ここで手順を確かめよう。分からないところは、遠慮せず聞いてくれ。",
+      "action": "stop_move",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "learner_mistake",
+      "title": "新人役の模擬発言",
+      "role": "learner",
+      "say": "指示書はまだ確認していませんが、次に進んでもいいですか。",
+      "action": "none",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "intervene",
+      "title": "確認を優先し、冗談を入れない",
+      "role": "r1",
+      "say": "いったん止めよう。まだ確認していないところは、一緒に確かめてから進もうな。",
+      "action": "none",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "resolved_stage",
+      "title": "振り返り場面への切り替え",
+      "role": "stage",
+      "say": "模擬研修の進行役：作業停止と確認を終え、危険が解消された設定で振り返りへ進む。実際の設備の安全確認を代行するものではない。",
+      "action": "none",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "hiyari_hat",
+      "title": "帽子の演出は未実装の予約として確認",
+      "role": "r1",
+      "say": "いまの、何かわかるか？ ヒヤリハットだ。気づいて止まれたのは大事な一歩だぞ。",
+      "action": "hat_tip",
+      "pause_after_s": 0.5
+    },
+    {
+      "id": "encourage",
+      "title": "質問を歓迎して終える",
+      "role": "r1",
+      "say": "失敗を隠さず、迷ったら声をかけてくれ。安全に覚えられるよう、俺も付き合うからな。",
+      "action": "hand_on_heart",
+      "pause_after_s": 0.0
+    }
+  ]
+}

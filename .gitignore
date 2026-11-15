@@ -7,3 +7,6 @@ __pycache__/
 /tmp/
 .lan_backup.json
 logs/
+local_tools/r1_local_settings.ps1
+CODEX_HANDOFF.md
+AGENT_CHAT.md

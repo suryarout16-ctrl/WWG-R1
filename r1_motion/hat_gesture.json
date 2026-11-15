@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "narrative_storyboard",
+  "executable": false,
+  "gesture": "hat_tip",
+  "saved_action_name": "hiyari_hat_v1",
+  "title": "ヒヤリハット：見えない帽子をかぶる身ぶり",
+  "status": "draft_not_physically_verified",
+  "hardware_profile": null,
+  "joint_targets": null,
+  "approximate_duration_s": 5.0,
+  "performance": "物を持たず、手を頭に触れさせずに、頭上の見えない帽子をかぶるように見せる。",
+  "steps": [
+    {"duration_s_approx": 0.8, "cue": "ヒヤリ……", "motion": "確認済みの自然な初期姿勢から、片手をゆっくり上げ始める。"},
+    {"duration_s_approx": 1.2, "cue": "", "motion": "頭・顔・胴体から十分な距離を保ち、手を頭上の空間へ運ぶ。接触しない。"},
+    {"duration_s_approx": 0.7, "cue": "ハット！", "motion": "頭上に帽子があるように短く間を置く。手首や指で物をつかむ動作は要求しない。"},
+    {"duration_s_approx": 1.3, "cue": "", "motion": "頭に近づけず、帽子をかぶったように見える範囲で手を外側へ退避する。"},
+    {"duration_s_approx": 1.0, "cue": "", "motion": "腕をゆっくり確認済みの初期姿勢へ戻す。"}
+  ],
+  "before_hardware_use": [
+    "実機の型式・腕の自由度・ファームウェア・可動限界と頭部まわりのクリアランスを確認する。",
+    "Unitree App の教示機能で、担当者が腕を支えながら非接触の滑らかな動作を作る。",
+    "この JSON は教示用の演出案であり、関節軌道やアップロードファイルとして実行しない。",
+    "既存の同名教示を上書きしないよう確認し、登録後の一覧で名前と 10 秒以内の再生時間を確認する。",
+    "周囲を空け、オペレーターと緊急停止を用意して段階的に検証する。",
+    "プリセット 26 は頭上で手を振る代替であり、この帽子の身ぶりと同一とは表示しない。"
+  ],
+  "sources": [
+    "https://support.unitree.com/home/en/R1_developer/arm_action_interface",
+    "https://support.unitree.com/home/en/R1_developer/arm_control_routine"
+  ]
+}
