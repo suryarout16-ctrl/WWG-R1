@@ -58,6 +58,25 @@ function Stop-IdlePanel($proc) {
     if (-not ($state -and $state.local -and $state.connection_kind -eq "local" -and -not $state.virtual)) {
         Assert-Physical $state
     }
+    # ローカル試験の返答待ちは、処理中の仕事がなければ実機切替時に解除できる。
+    # 実機パネルや、通話・録音・動作中のパネルには停止APIを送らない。
+    $localReplyWait = -not $Offline -and -not $Stop -and $state.local -and $state.connection_kind -eq "local" -and
+        -not $state.virtual -and -not $state.dds_address -and $state.body.dry -and $state.posture.dry -and
+        $state.training.active -and $state.training.phase -eq "await_reply" -and $state.training.awaiting_reply
+    $working = $state.busy -or $state.body.busy -or $state.body.hold_active -or $state.body.stop_required -or
+        $state.posture.busy -or $state.recording -or $state.call.active -or $state.call.input_closing
+    if ($localReplyWait -and -not $working) {
+        Say "ローカル研修の返答待ちを終了して、実機用へ切り替えます" "Cyan"
+        $panelPort = Get-PanelPort $proc
+        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$panelPort/api/training/stop" -Method Post `
+            -ContentType "application/json" -Body "{}" -TimeoutSec 5
+        if (-not $response.ok) { throw "ローカル研修の待機を終了できませんでした" }
+        $state = Get-PanelState $panelPort
+        if (-not ($state -and $state.local -and $state.connection_kind -eq "local" -and
+                  -not $state.virtual -and -not $state.dds_address -and $state.body.dry -and $state.posture.dry)) {
+            throw "切替前のローカル状態を確認できません。パネルは終了しません"
+        }
+    }
     if ($state.busy -or $state.body.busy -or $state.body.hold_active -or $state.body.stop_required -or
         $state.posture.busy -or $state.training.active -or $state.recording -or
         $state.call.active -or $state.call.input_closing) {
