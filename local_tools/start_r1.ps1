@@ -53,49 +53,94 @@ function Assert-Physical($state) {
         throw "実機パネルの状態を確認できません。別のモードで起動せず停止します"
     }
 }
-function Stop-IdlePanel($proc) {
-    $state = Get-PanelState (Get-PanelPort $proc)
-    if (-not ($state -and $state.local -and $state.connection_kind -eq "local" -and -not $state.virtual)) {
-        Assert-Physical $state
-    }
-    # ローカル試験の返答待ちは、処理中の仕事がなければ実機切替時に解除できる。
-    # 実機パネルや、通話・録音・動作中のパネルには停止APIを送らない。
-    $localReplyWait = -not $Offline -and -not $Stop -and $state.local -and $state.connection_kind -eq "local" -and
-        -not $state.virtual -and -not $state.dds_address -and $state.body.dry -and $state.posture.dry -and
-        $state.training.active -and $state.training.phase -eq "await_reply" -and $state.training.awaiting_reply
-    $working = $state.busy -or $state.body.busy -or $state.body.stopping -or $state.body.hold_active -or $state.body.stop_required -or
-        $state.posture.busy -or $state.recording -or $state.call.active -or $state.call.input_closing
-    if ($localReplyWait -and -not $working) {
-        Say "ローカル研修の返答待ちを終了して、実機用へ切り替えます" "Cyan"
-        $panelPort = Get-PanelPort $proc
-        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$panelPort/api/training/stop" -Method Post `
-            -ContentType "application/json" -Body "{}" -TimeoutSec 5
-        if (-not $response.ok) { throw "ローカル研修の待機を終了できませんでした" }
-        $state = Get-PanelState $panelPort
-        if (-not ($state -and $state.local -and $state.connection_kind -eq "local" -and
-                  -not $state.virtual -and -not $state.dds_address -and $state.body.dry -and $state.posture.dry)) {
-            throw "切替前のローカル状態を確認できません。パネルは終了しません"
+function Get-PanelProcessHandles($proc) {
+    $handles = @()
+    $parentHandle = Get-Process -Id ([int]$proc.ProcessId) -ErrorAction Stop
+    if ($parentHandle.HasExited) { throw "対象パネルは既に終了しています" }
+    # 終了前にOSハンドルを保持し、外部起動プロセスのExitCodeを終了後も取得する。
+    $null = $parentHandle.Handle
+    $handles += $parentHandle
+    $pending = New-Object 'System.Collections.Generic.Queue[int]'
+    $visited = New-Object 'System.Collections.Generic.HashSet[int]'
+    $pending.Enqueue([int]$proc.ProcessId)
+    $null = $visited.Add([int]$proc.ProcessId)
+    while ($pending.Count -gt 0) {
+        $parentId = $pending.Dequeue()
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parentId")) {
+            $childId = [int]$child.ProcessId
+            if (-not $visited.Add($childId)) { continue }
+            $pending.Enqueue($childId)
+            $childHandle = Get-Process -Id $childId -ErrorAction SilentlyContinue
+            if ($childHandle -and -not $childHandle.HasExited) {
+                $null = $childHandle.Handle
+                $handles += $childHandle
+            }
         }
     }
-    # 明示的な実機再起動では、新プロセスにも停止未確認ロックを引き継ぐ。
-    # 引数に確実にロック要求が含まれる場合だけ、旧stop_requiredを終了拒否から除く。
-    $keepStopInterlock = $state.body.stop_required -and $Restart -and -not $Offline -and -not $Stop -and
-        (@($pargs) -contains "--require-stop-verification") -and
-        $state.connection_kind -eq "robot" -and -not $state.local -and -not $state.virtual -and
-        $state.fsm_ok -and $state.dds_address -eq $PcIp -and
-        $state.body.dry -eq $false -and $state.posture.dry -eq $false
-    if ($state.busy -or $state.body.busy -or $state.body.stopping -or $state.body.hold_active -or
-        ($state.body.stop_required -and -not $keepStopInterlock) -or
-        $state.posture.busy -or $state.training.active -or $state.recording -or
-        $state.call.active -or $state.call.input_closing) {
-        throw "パネルを使用中です。通話・研修を終了し、動作が終わってから再実行してください"
+    return $handles
+}
+function Wait-PanelExit($handles) {
+    if (-not @($handles).Count) { throw "終了を確認するプロセスがありません" }
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    foreach ($handle in @($handles)) {
+        $remaining = [int][Math]::Max(0, [Math]::Min(20000, ($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+        if (-not $handle.HasExited -and -not $handle.WaitForExit($remaining)) {
+            throw "プロセス $($handle.Id) の終了を確認できません。強制終了せず、再起動を中断します"
+        }
+        if (-not $handle.HasExited) { throw "プロセス $($handle.Id) が終了していません" }
     }
-    if ($keepStopInterlock) {
-        Say "停止未確認のロックを新しい実機パネルへ引き継ぎます。復旧後に停止を再確認してください" "Yellow"
+    $parentExitCode = @($handles)[0].ExitCode
+    if ($null -eq $parentExitCode -or $parentExitCode -ne 0) {
+        throw "パネルの後処理が正常終了していません (exit=$parentExitCode)。再起動を中断します"
     }
-    Say "待機中のパネルを終了します (PID $($proc.ProcessId))" "Yellow"
-    & taskkill.exe /PID $proc.ProcessId /T /F | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "パネルを終了できませんでした" }
+}
+function Stop-IdlePanel($proc) {
+    $panelPort = Get-PanelPort $proc
+    $state = Get-PanelState $panelPort
+    $localPanel = $state -and $state.local -and $state.connection_kind -eq "local" -and
+        -not $state.virtual -and -not $state.dds_address -and $state.body.dry -and $state.posture.dry
+    if (-not $localPanel) {
+        Assert-Physical $state
+        if ($state.body.dry -ne $false -or $state.posture.dry -ne $false) {
+            throw "実機パネルの制御状態を確認できません"
+        }
+    }
+    if ($state.posture.busy -or (-not $localPanel -and $state.fsm -in @(701, 702, 816))) {
+        throw "起立・姿勢変更・腕動作が終わってから終了してください"
+    }
+    if ($state.shutdown.supported -ne $true -or $state.process_id -ne $proc.ProcessId) {
+        throw "対象パネルの安全終了APIを確認できません。強制終了はしません"
+    }
+    # 通常起動による置換では、利用中の会話や操作を中断しない。
+    # 明示的なStop/Restartだけが、安全終了APIへ終了準備を依頼する。
+    if (-not $Stop -and -not $Restart) {
+        $working = $state.busy -or $state.body.busy -or $state.body.stopping -or $state.body.hold_active -or
+            $state.body.stop_required -or $state.posture.busy -or $state.recording -or
+            $state.call.active -or $state.call.input_closing
+        $localReplyWait = $localPanel -and -not $Offline -and -not $working -and
+            $state.training.active -and $state.training.phase -eq "await_reply" -and $state.training.awaiting_reply
+        if ($working -or ($state.training.active -and -not $localReplyWait)) {
+            throw "パネルを使用中です。終了する場合は -Stop、再起動する場合は -Restart を指定してください"
+        }
+    }
+    $handles = @(Get-PanelProcessHandles $proc)
+    Say "停止確認と終了処理を依頼します (PID $($proc.ProcessId))" "Yellow"
+    try {
+        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$panelPort/api/shutdown" -Method Post `
+            -ContentType "application/json" -Body "{}" -TimeoutSec 35
+    }
+    catch {
+        $requestError = $_
+        $message = "安全終了の要求に失敗しました: " + $requestError.Exception.Message
+        try {
+            $details = $requestError.ErrorDetails.Message | ConvertFrom-Json
+            if ($details.message) { $message = $details.message }
+        } catch { }
+        throw $message
+    }
+    if ($response.ok -ne $true) { throw "安全終了を完了できませんでした: $($response.message)" }
+    Wait-PanelExit $handles
+    Say "パネルと子プロセスの終了を確認しました" "Green"
 }
 function Test-TargetPanel($state) {
     if (-not $state -or $state.virtual) { return $false }
@@ -111,8 +156,10 @@ try {
     if (-not (Test-Path -LiteralPath $Py)) { throw "Python がありません。先にリポジトリで pixi install を実行してください" }
     Set-Location $Repo
     if ($Stop) {
-        foreach ($panel in @(Get-Panels)) { Stop-IdlePanel $panel }
-        Say "パネルを停止しました" "Green"
+        if ($DryRun) { Say "[DryRun] 安全終了API → パネルと子プロセスの終了待ち（何も実行しません）" "Cyan"; exit 0 }
+        $targets = @(Get-Panels)
+        if (-not $targets.Count) { Say "パネルは起動していません" "Green"; exit 0 }
+        foreach ($panel in $targets) { Stop-IdlePanel $panel }
         exit 0
     }
     $StartupConfig = Get-Content -LiteralPath (Join-Path $PSScriptRoot "r1_startup.json") -Raw -Encoding UTF8 | ConvertFrom-Json

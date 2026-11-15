@@ -24,6 +24,7 @@ import json
 import math
 import os
 import secrets
+import subprocess
 import sys
 import tempfile
 import threading
@@ -134,6 +135,15 @@ class Engine:
         self.rec_started = 0.0
         self.call = None
         self.closed = False
+        self.shutdown_requested = False
+        self.shutdown_ready = False
+        self.shutdown_status = "idle"
+        self.shutdown_error = ""
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_job_reserved = False
+        self._shutdown_record_stream = None
+        self._shutdown_record_event = None
+        self._shutdown_record_error = ""
         self.posture_epoch = 0
         self.hold_epoch = secrets.randbits(48) + 1
         self._hold_token = None
@@ -334,6 +344,10 @@ class Engine:
 
     def state(self) -> dict:
         return {
+            "process_id": os.getpid(),
+            "shutdown": {"supported": True, "requested": self.shutdown_requested,
+                         "ready": self.shutdown_ready, "status": self.shutdown_status,
+                         "error": self.shutdown_error},
             "local": self.args.local, "fsm": self.fsm, "fsm_ok": self.fsm_ok,
             "virtual": self.connection_kind == "virtual", "connection_kind": self.connection_kind,
             "dds_address": self.dds_address,
@@ -381,6 +395,8 @@ class Engine:
     # ------------------------------------------------------------ 仕事の実行
     def submit(self, label: str, fn, *fn_args) -> tuple[bool, str]:
         with self.control_lock:
+            if not self._work_current():
+                return False, "終了確認中です。新しい処理は開始しません"
             if self.rec_stream is not None:
                 return False, "録音を停止してから操作してください"
             if not self.job_lock.acquire(blocking=False):
@@ -389,7 +405,8 @@ class Engine:
 
         def run():
             try:
-                fn(*fn_args)
+                if self._work_current():
+                    fn(*fn_args)
             except Exception as error:
                 import traceback
                 log(f"[エラー] {label}: {type(error).__name__}: {error}\n{traceback.format_exc()}")
@@ -402,7 +419,7 @@ class Engine:
 
     def _speak(self, text: str, gesture: str = "none", record: dict | None = None,
                should_continue=None, allowed_body=None) -> None:
-        current = lambda: not self.closed and (should_continue is None or should_continue())
+        current = lambda: self._work_current() and (should_continue is None or should_continue())
         text = rc.clean_for_speech(text)
         if not text or not current():
             return
@@ -479,6 +496,8 @@ class Engine:
     def _chat(self, user_text: str, source: str, record: dict | None = None,
               should_continue=None, language: str | None = None, low_confidence: bool = False,
               training_step: str | None = None, display_user: bool = True) -> dict | None:
+        if not self._work_current():
+            return
         if (training_step is None and self.persona == "mentor" and not low_confidence
                 and is_training_start(user_text)):
             return self._run_training(user_text, source, should_continue, language)
@@ -495,7 +514,7 @@ class Engine:
             return self._run_stand(stand_request["posture"], stand_request["ready"], should_continue,
                                    self.posture_epoch)
         generation = self.training.generation if self.training.active else None
-        current = lambda: (not self.closed and (should_continue is None or should_continue())
+        current = lambda: (self._work_current() and (should_continue is None or should_continue())
                            and (generation is None or generation == self.training.generation))
         if not current():
             return
@@ -593,6 +612,8 @@ class Engine:
             self.add("system", "見本を動かすため、会話の身ぶりをオンにしてから研修を開始してください")
             return None
         with self.control_lock:
+            if not self._work_current():
+                return None
             generation = self.training.start()
         current = lambda: (not self.closed and generation == self.training.generation
                            and (should_continue is None or should_continue()))
@@ -687,6 +708,8 @@ class Engine:
         if isinstance(epoch, bool) or not isinstance(epoch, int):
             return False, "画面の状態を更新してから操作してください"
         with self.control_lock:
+            if not self._work_current():
+                return False, "終了確認中です。歩行は開始しません"
             if epoch != self.hold_epoch:
                 return False, "停止前の古い押下依頼は実行しません"
             if self.closed or not self.body_enabled:
@@ -739,6 +762,8 @@ class Engine:
         return True, message
 
     def body_hold_heartbeat(self, token):
+        if not self._work_current():
+            return False, "終了確認中です。押下を更新しません"
         return self.body.heartbeat_hold(token)
 
     def body_hold_release(self, token):
@@ -750,6 +775,8 @@ class Engine:
 
     def body_stop(self):
         with self.control_lock:
+            if self.shutdown_ready:
+                return False, "停止確認は完了し、終了中です"
             self.hold_epoch += 1
             self.training.stop()
             self._cancel_stand()
@@ -770,7 +797,7 @@ class Engine:
 
     def _run_stand(self, posture: str, ready: bool, should_continue=None, epoch=None):
         epoch = self.posture_epoch if epoch is None else epoch
-        current = lambda: (not self.closed and epoch == self.posture_epoch
+        current = lambda: (self._work_current() and epoch == self.posture_epoch
                            and (should_continue is None or should_continue()))
         if not current():
             return {"status": "cancelled", "error": "起立の依頼は取り消されています"}
@@ -866,6 +893,8 @@ class Engine:
             return self._record_start()
 
     def _record_start(self):
+        if not self._work_current():
+            return False, "終了確認中です。録音は開始しません"
         import sounddevice as sd
         if not self.stt:
             return False, "音声認識なし（--no-stt）で起動しています"
@@ -884,7 +913,7 @@ class Engine:
             log("[マイク] " + json.dumps(metadata, ensure_ascii=False))
         self.rec_frames = []
         stream = sd.InputStream(samplerate=rc.SAMPLE_RATE, channels=1, dtype="int16", device=mic,
-                                callback=lambda data, *_: self.rec_frames.append(data.copy()))
+                                callback=lambda data, *_: self.rec_frames.append(data.copy()) if self._work_current() else None)
         try:
             stream.start()
         except Exception:
@@ -911,7 +940,7 @@ class Engine:
         return self.submit("聞き取り中", self._listen, audio)
 
     def _listen(self, audio: np.ndarray, should_continue=None) -> None:
-        current = lambda: not self.closed and (should_continue is None or should_continue())
+        current = lambda: self._work_current() and (should_continue is None or should_continue())
         if not current():
             return
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -956,7 +985,7 @@ class Engine:
         return bool(self.call and self.call.state()["active"])
 
     def _can_listen(self):
-        return not self.closed and not self.job_lock.locked() and self.rec_stream is None
+        return self._work_current() and not self.job_lock.locked() and self.rec_stream is None
 
     def _call_error(self, message):
         log(f"[通話] {message}")
@@ -964,7 +993,7 @@ class Engine:
 
     def _call_utterance(self, audio, is_current):
         with self.control_lock:
-            if not is_current() or not self.job_lock.acquire(blocking=False):
+            if not self._work_current() or not is_current() or not self.job_lock.acquire(blocking=False):
                 return
             self.busy = "聞き取り中"
         try:
@@ -975,6 +1004,8 @@ class Engine:
 
     def call_start(self):
         with self.control_lock:
+            if not self._work_current():
+                return False, "終了確認中です。通話は開始しません"
             if not self.stt:
                 return False, "音声認識なしで起動しています"
             if self.job_lock.locked() or self.rec_stream is not None:
@@ -1027,6 +1058,122 @@ class Engine:
             self.add("system", "研修資料を削除し、会話をリセットしました")
             return True, "ok"
 
+    def _work_current(self):
+        return not self.closed and not self.shutdown_requested
+
+    def _shutdown_failed(self, message):
+        self.shutdown_ready = False
+        self.shutdown_status, self.shutdown_error = "blocked", str(message)
+        if not self.args.local:
+            self.body.require_stop_verification("終了前の停止確認が未完了です。停止を再確認してください")
+        return False, self.shutdown_error
+
+    def _discard_shutdown_recording(self):
+        """終了時の録音は文字起こしへ送らず、閉じ終わるまで追跡する。"""
+        with self.control_lock:
+            if self.rec_stream is not None:
+                self._shutdown_record_stream, self.rec_stream = self.rec_stream, None
+                self.rec_frames = []
+            if self._shutdown_record_stream is None:
+                return
+            if self._shutdown_record_event is not None and not self._shutdown_record_event.is_set():
+                return
+            stream = self._shutdown_record_stream
+            done = self._shutdown_record_event = threading.Event()
+            self._shutdown_record_error = ""
+
+        def discard():
+            try:
+                try:
+                    stream.stop()
+                except Exception:
+                    pass  # closeが正常終了すれば入力の終了を確認できる。
+                stream.close()
+                with self.control_lock:
+                    if self._shutdown_record_stream is stream:
+                        self._shutdown_record_stream = None
+            except Exception as error:
+                self._shutdown_record_error = type(error).__name__
+            finally:
+                done.set()
+        try:
+            threading.Thread(target=discard, daemon=True, name="r1-recording-discard").start()
+        except Exception as error:
+            self._shutdown_record_error = type(error).__name__
+            done.set()
+            raise
+
+    def prepare_shutdown(self, timeout=8.0):
+        """ゼロ速度後の静止を確認して終了を準備する。失敗時は監視を残す。"""
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 30:
+            return False, "終了確認の待機時間が不正です"
+        if not self._shutdown_lock.acquire(blocking=False):
+            return False, "終了確認を実行中です"
+        reserved = False
+        try:
+            if self.shutdown_ready:
+                return True, "停止確認と終了準備は完了しています"
+            with self.control_lock:
+                if not self.args.local and (self.posture.state()["busy"] or self.fsm in (701, 702, 816)):
+                    return False, "腕・起立・着座動作中は終了しません。動作完了を待ってください"
+                self.shutdown_requested = True
+                self.shutdown_status, self.shutdown_error = "checking", ""
+                self.hold_epoch += 1
+                self.training.stop()
+                self._cancel_stand()
+                if self.call:
+                    self.call.stop()
+                if not self.args.local:
+                    self.body.require_stop_verification("終了前の停止確認を実行中です")
+            self._discard_shutdown_recording()
+            deadline = time.monotonic() + timeout
+            if self.body_enabled and (self.body.state()["busy"] or self.body.state().get("hold_active")):
+                ok, message = self.body.stop()
+                if not ok:
+                    return self._shutdown_failed(message)
+
+            # 既存の仕事が終了してからjob_lockを予約し、確認後に新しい仕事を挟ませない。
+            while time.monotonic() < deadline:
+                call_state = self.call.state() if self.call else {}
+                recording_pending = self._shutdown_record_stream is not None
+                if self._shutdown_record_error:
+                    return self._shutdown_failed("録音を終了できません: " + self._shutdown_record_error)
+                body_state = self.body.state()
+                idle = (not self.posture.state()["busy"] and not body_state["busy"] and
+                        not body_state.get("stopping") and not body_state.get("hold_active") and
+                        not call_state.get("active") and not call_state.get("input_closing") and
+                        not recording_pending and getattr(self.gesturer, "thread", None) is None and
+                        (self.args.local or self.fsm not in (701, 702, 816)))
+                if idle and self.job_lock.acquire(blocking=False):
+                    reserved = True
+                    break
+                time.sleep(min(.05, max(0, deadline - time.monotonic())))
+            if not reserved:
+                return self._shutdown_failed("通話・録音・発話・動作の終了を確認できません。パネルを残します")
+            if not self.args.local:
+                if self.connection_kind != "robot" or not self.fsm_ok or not self.body.require_feedback:
+                    return self._shutdown_failed("実機と停止確認用の状態監視を確認できません")
+                ok, message = self.body.stop()
+                body_state = self.body.state()
+                if (not ok or body_state["stop_required"] or not body_state["feedback_valid"] or
+                        not body_state["joint_stationary_observed"]):
+                    return self._shutdown_failed(message)
+                if not self.fsm_ok or self.fsm in (701, 702, 816) or self.posture.state()["busy"]:
+                    return self._shutdown_failed("機体の動作終了を確認できません。パネルを残します")
+            with self.control_lock:
+                self.shutdown_ready = True
+                self.shutdown_status, self.shutdown_error = "ready", ""
+                self._shutdown_job_reserved = True
+                self.busy = "終了準備完了"
+            log("[終了] 停止確認と終了準備が完了しました")
+            return True, "停止確認と終了準備が完了しました"
+        except Exception as error:
+            return self._shutdown_failed("終了確認に失敗しました: " + type(error).__name__)
+        finally:
+            if reserved and not self.shutdown_ready:
+                self.job_lock.release()
+            self._shutdown_lock.release()
+
     def close(self):
         self.closed = True
         self._cancel_stand()
@@ -1042,6 +1189,7 @@ class Engine:
             self.rec_stream = None
         if self.stt:
             self.stt.close()
+            self._wait_owned_worker(getattr(self.stt, "proc", None))
         for brain in {id(b): b for b in [*self.brains.values(), *self.mentor_backends.values()]}.values():
             if getattr(brain, "relay", None):
                 brain.relay.close()
@@ -1051,6 +1199,18 @@ class Engine:
             proc = getattr(tts, "proc", None)
             if proc and proc.poll() is None:
                 proc.terminate()
+                self._wait_owned_worker(proc)
+
+    @staticmethod
+    def _wait_owned_worker(proc):
+        """停止確認済みの終了処理で、自分の音声子プロセスを回収する。"""
+        if proc is None:
+            return
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1103,6 +1263,7 @@ def make_handler(engine: Engine):
                 return self._json({"ok": False, "message": "送信内容を読み取れません"}, 400)
             text = str(data.get("text", "")).strip()[:300]
             routes = {
+                "/api/shutdown": engine.prepare_shutdown,
                 "/api/chat": lambda: engine.chat(text) if text else (False, "文が空です"),
                 "/api/say": lambda: engine.say(text) if text else (False, "文が空です"),
                 "/api/greet": engine.greet,
@@ -1131,12 +1292,25 @@ def make_handler(engine: Engine):
             }
             if self.path not in routes:
                 return self._json({"error": "not found"}, 404)
+            if getattr(engine, "shutdown_requested", False):
+                allowed_during_shutdown = {"/api/shutdown"}
+                if not getattr(engine, "shutdown_ready", False):
+                    allowed_during_shutdown.update({"/api/body/stop", "/api/body/hold/release",
+                                                    "/api/call/stop", "/api/training/stop",
+                                                    "/api/posture/cancel"})
+                if self.path not in allowed_during_shutdown:
+                    return self._json({"ok": False, "message": "終了確認中です。新しい操作は開始しません"}, 409)
             try:
                 ok, message = routes[self.path]()
             except Exception as error:
                 ok, message = False, f"{type(error).__name__}: {error}"
                 log(f"[エラー] {self.path}: {message}")
             self._json({"ok": ok, "message": message}, 200 if ok else 409)
+            if self.path == "/api/shutdown" and ok:
+                # HTTP応答を先に返す。serve_foreverと同じスレッドでshutdownを呼ばない。
+                self.wfile.flush()
+                threading.Thread(target=self.server.shutdown, daemon=True,
+                                 name="r1-http-shutdown").start()
     return Handler
 
 

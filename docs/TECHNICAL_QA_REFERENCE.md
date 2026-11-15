@@ -57,10 +57,10 @@
 | AIの出力形式 | `{"say": 文, "gesture": 名前}` のJSONだけ。gesture は許可一覧の enum。文の長さ上限は日本語240字・英語400字 | `personas.py` `LocalBrain.reply`、`MAX_SAY_CHARS(_EN)` | 本版 | 実機 |
 | 検査と作り直し | 形式・長さ・`<think>` 混入・許可外の身ぶりを検査し、だめなら身ぶりなしの平文で1回だけ作り直す | `personas.py` `_structured_reply` / `_speech` | 本版 | 単体 |
 | 移動前の発話 | AIの文のまま話す。実行結果・周囲の認識・距離を語った文だけプログラムの決まった文に置き換える。自己紹介は AI の言葉（固定文は回帰試験用） | `personas.py` `motion_claim` / `BODY_ANNOUNCEMENTS`、`bilingual.BODY_ANNOUNCEMENTS_EN`、`LocalBrain.fixed_lines` | 本版 | 単体 |
-| 話す | Windows SAPI で合成（日本語 Microsoft Ichiro、英語 Microsoft David。どちらも男性の声）。PowerShell 7（pwsh）で動かし、指定の声を選べなければ起動を止める。16kHz・モノラルのPCMを1秒（32000バイト）ずつ DDS の voice サービス `PlayStream` で送る | `r1_chat.py` `SapiTTS`、`SAMPLE_RATE`、`CHUNK_BYTES`、`web_ui.py` `Engine._tts_for` | main（pwsh・英語の声は作業ツリー） | 実機でPlayStream再生済み。**ただし11/15の修正まで、Windows PowerShell 5.1 が Ichiro を選べず既定の Haruka（女性）で話していた**。修正後の Ichiro / David は PC上の合成のみ確認、実機は未 |
-| 腕の身ぶり | Unitree Arm Action の固定ID: 手を振る25、大きく手を振る26、拍手17、ガッツポーズ29、胸に手33、強調35、前方を示す31。姿勢を保つ動作（29/31/33/35）は話し終わったらID 99で戻す。立って動ける状態（FSM 811/816）のときだけ送る | `r1_chat.py` `GESTURES` / `HOLD_IDS` / `STANDING_FSM` | main（31 は作業ツリー） | 実機（31の保持は未） |
+| 話す | Windows SAPI で合成（日本語 Microsoft Ichiro、英語 Microsoft David。どちらも男性の声）。PowerShell 7（pwsh）で動かし、指定の声を選べなければ起動を止める。16kHz・モノラルのPCMを1秒（32000バイト）ずつ DDS の voice サービス `PlayStream` で送る | `r1_chat.py` `SapiTTS`、`SAMPLE_RATE`、`CHUNK_BYTES`、`web_ui.py` `Engine._tts_for` | 本版 | 実機でPlayStream再生済み。**ただし11/15の修正まで、Windows PowerShell 5.1 が Ichiro を選べず既定の Haruka（女性）で話していた**。修正後の Ichiro / David は PC上の合成のみ確認、実機は未 |
+| 腕の身ぶり | Unitree Arm Action の固定ID: 手を振る25、大きく手を振る26、拍手17、ガッツポーズ29、胸に手33、強調35、前方を示す31。姿勢を保つ動作（29/31/33/35）は話し終わったらID 99で戻す。立って動ける状態（FSM 811/816）のときだけ送る | `r1_chat.py` `GESTURES` / `HOLD_IDS` / `STANDING_FSM` | 本版 | 実機（31の保持は未） |
 | 帽子の身ぶり | 教示動作の予約名 `hat_tip` があるだけで、専用動作は未実装 | `r1_chat.py` `GESTURES`、`r1_motion/hat_gesture.json` | 本版 | 未 |
-| 歩行 | sport API 7105 の速度指令。1回最大2秒、前後左右 0.3 m/s 以下、旋回 0.5 rad/s 以下、最後に速度ゼロ。Running(811) が必要。この機体で観測した127は物理的な成功を意味しない。脚の関節データで変化・静止を観測するが、実際の移動・停止には目視との照合が必要。127の場合は `physical_confirmation_required` が残る。距離や到達は保証しない | `r1_motion/body_control.py`（`max_duration`、上限検査、`_Call(7105, …)`、`state`）、`r1_motion/body_feedback.py` | 本版 | 実機（0.3 m/s×2秒の前進と停止を利用者が目視確認） |
+| 会話からの単発移動 | sport API 7105 の速度指令。1回最大2秒、前後左右 0.3 m/s 以下、旋回 0.5 rad/s 以下、最後に速度ゼロ。Running(811) が必要。この機体で観測した127は物理的な成功を意味しない。脚の関節データで変化・静止を観測するが、実際の移動・停止には目視との照合が必要。127の場合は `physical_confirmation_required` が残る。距離や到達は保証しない | `r1_motion/body_control.py`（`max_duration`、上限検査、`_Call(7105, …)`、`state`）、`r1_motion/body_feedback.py` | 本版 | 実機（0.3 m/s×2秒の前進と停止を利用者が目視確認） |
 | 歩行の許可 | AIが移動を選んでも、利用者が短い命令文で直接頼んだときだけ実行する（日本語・英語）。質問・条件・否定・説明の文では動かない | `body_control.requested_body_actions`、`bilingual.requested_body_actions_en`、`web_ui.py` `_chat` | 本版 | 単体・仮想（日本語） |
 | 記憶 | AIに渡す会話の文脈は直近8往復まで。画面の履歴や保存ログを8往復で消す意味ではない。パネルの状態APIは画面用履歴の末尾60項目を返す。研修資料は参考として読み、資料内の命令には従わない | `personas.py` `LocalBrain.MAX_TURNS` / `reply` / `REFERENCE_RULE`、`web_ui.py` `Engine.state`、`r1_chat.py` `log_turn` | 本版 | 単体 |
 | 学習 | 人格は指示文と参考資料で作っている。LoRA・ファインチューニングなどの追加学習はしていない | `personas.py`、`identity.py`（学習コードは存在しない） | 本版 | — |
@@ -69,7 +69,7 @@
 
 ## 英語での受け答え（なまりのある英語を含む）
 
-手動ボタンの押下中歩行は `BodyController.start_hold` / `heartbeat_hold` / `release_hold` が担当する。押下リース0.75秒、クライアント更新0.2秒、速度指令更新0.3秒／duration2秒。単発会話の最大2秒と、押下中の継続更新を区別する。解除済みトークンの取消とEngineの起動・停止世代番号で古い開始を拒否し、更新異常や状態異常時にゼロ速度を送る。実際の停止確認や機体の非常停止とは別である。
+手動ボタンの押下中歩行は `BodyController.start_hold` / `heartbeat_hold` / `release_hold` が担当し、現在の起動設定は並進0.9 m/s・旋回1.8 rad/s。押下リース0.75秒、クライアント更新0.2秒、速度指令更新0.3秒／duration2秒。単発会話の最大2秒と、押下中の継続更新を区別する。解除済みトークンの取消とEngineの起動・停止世代番号で古い開始を拒否し、更新異常や状態異常時にゼロ速度を送る。指令値は実測速度を意味せず、実際の停止確認や機体の非常停止とは別である。
 
 Windowsのマイクは `audio_input.resolve_input_device` が指定と同じ物理機器のWASAPIを優先し、VoiceCallと単発録音で共用する。番号の再列挙やBluetoothのWDM-KS名の別名を扱い、機器名が曖昧なら失敗として別のマイクへ切り替えない。今回の入力開始確認と、実話者のなまりの認識精度は別の確認事項である。
 
@@ -107,3 +107,9 @@ Windowsのマイクは `audio_input.resolve_input_device` が指定と同じ物�
 - 実行: `pixi run python r1_chat/qa_eval.py`（既定は Strata と `scenarios/live_training_context.txt`。GPTは `--backend openai --yes-paid` で有料。結果は `logs/qa_eval_*.json`）
 - 採点は語の有無による目安で、最終判断は人が `logs/qa_eval_*.json` の返事を読んで行う。
 - 単体テスト: `tests/test_language_qa.py`（ネットワークなし）。固定文の回帰試験は `tests/test_identity.py`（`fixed_lines=True`）。
+
+## 状態監視と安全終了
+
+LowStateの有効更新が1秒止まると受信readerだけを再作成し、復旧後はCRC正常で進むtick3件・0.2秒以上を確認する。停止確認の窓は同じstream_epochの観測だけを使う。起動時の停止ロックは明示的なゼロ速度後の新しい静止観測で解除する。根拠はbody_feedback.pyとbody_control.py。
+
+/api/shutdownは新規処理の受付を止め、録音を認識へ送らず破棄し、実機のゼロ速度後の静止確認と既存処理の終了を待つ。確認失敗時は監視を残す。HTTP応答後にサーバーを終了し、起動スクリプトは親子プロセスの終了と親の正常終了コードを確認する。R1の電源断・脱力ではない。根拠はweb_ui.pyのprepare_shutdownとstart_r1.ps1。実機での新しい終了サイクルはLAN未接続のため未確認として記録する。

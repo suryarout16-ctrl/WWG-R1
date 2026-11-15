@@ -1,5 +1,7 @@
 # Unitree R1 開発メモ（2026-11-14 時点）
 
+これは初期調査時の記録で、見込みや当時未検証だった機能を含む。現在の接続・動作確認・制約・起動終了手順は [ナレッジ集](KNOWLEDGE_BASE.md) と [即興デモ](LIVE_DEMO.md) を優先する。
+
 出典: ハッカソン配布資料・運用ガイド / humanoid_hackathon_env (commit 5ae30a8, 11/13 20:03) /
 Unitree公式 R1 video_service / syswonder/robot-unitree-r1 (commit 8e77682)
 
